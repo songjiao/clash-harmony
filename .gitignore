@@ -1,0 +1,29 @@
+# Personal configs, secrets, and signing material
+harmony-mihomo-tailscale.yaml
+*.local.yaml
+certs/
+*.p12
+*.p7b
+*.cer
+password.txt
+
+# Generated native libraries & HarmonyOS build outputs
+app/entry/src/main/cpp/prebuilt/*/libmihomo_ohos.so
+app/entry/src/main/cpp/prebuilt/*/libmihomo_ohos.h
+.hvigor-user/
+app/.hvigor/
+app/.idea/
+app/.preview/
+app/.cxx/
+app/entry/.cxx/
+app/build/
+app/entry/build/
+app/oh_modules/
+app/entry/oh_modules/
+app/node_modules/
+app/local.properties
+*.hap
+*.hsp
+*.har
+*.log
+.DS_Store

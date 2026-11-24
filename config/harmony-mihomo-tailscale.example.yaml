@@ -1,0 +1,169 @@
+# Clash Harmony (Mihomo + Patched Tailscale) 示例配置模板
+# 请复制或参考此文件生成你自己的本地配置（请勿将真实密码、订阅链接或 AuthKey 提交到 Git）。
+# 如需让 Tailscale 交互式认证（登录 URL 会显示在 App 首页和「诊断 -> 日志」卡片中），可省略 auth-key；
+# 如需免登录自动接入，也可在 Tailscale 节点下取消 auth-key 注释。
+
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+external-controller: 127.0.0.1:9090
+secret: ''
+ipv6: false
+
+sniffer:
+  enable: true
+  sniff:
+    HTTP:
+      ports:
+        - 80
+        - 8080-8880
+      override-destination: true
+    TLS:
+      ports:
+        - 443
+        - 8443
+    QUIC:
+      ports:
+        - 443
+        - 8443
+  skip-domain:
+    - Mijia Cloud
+    - +.push.apple.com
+    - +.your-tailnet.ts.net
+    - +.ts.net
+
+dns:
+  enable: true
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  listen: 127.0.0.1:1053
+  use-hosts: true
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  proxy-server-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  nameserver-policy:
+    +.your-tailnet.ts.net: tailscale://Tailscale
+    +.ts.net: tailscale://Tailscale
+  fallback:
+    - 8.8.8.8
+    - 1.1.1.1
+  fallback-filter:
+    geoip: true
+    geoip-code: CN
+    ipcidr:
+      - 240.0.0.0/4
+    domain:
+      - +.google.com
+      - +.googleapis.com
+  fake-ip-filter:
+    # 必须放过 Tailscale 控制面与自定义 DERP 域名，避免 Fake-IP 环路
+    - +.tailscale.com
+    - +.tailscale.io
+    - +.ts.net
+    - derp.example.com
+    - proxy.example.com
+    - '*.lan'
+    - '*.local'
+
+proxies:
+  - name: Tailscale
+    type: tailscale
+    udp: true
+    hostname: harmony-phone
+    state-dir: tailscale
+    accept-routes: true
+    # 可选：如不想手动在浏览器点击登录链接，可填入可重用 AuthKey
+    # auth-key: tskey-auth-xxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    # 可选：如需经特定 Exit Node 出口流量（请按实际 tailnet 填写）
+    # exit-node: 100.64.x.y
+    # exit-node-allow-lan-access: true
+
+  - name: 示例-VLESS-Reality
+    type: vless
+    server: proxy.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000000
+    tls: true
+    udp: true
+    servername: www.apple.com
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: REPLACE_WITH_YOUR_PUBLIC_KEY
+      short-id: '01234567'
+      spider-x: /
+    network: tcp
+
+  - name: 示例-Trojan
+    type: trojan
+    server: trojan.example.com
+    port: 443
+    password: YOUR_PROXY_PASSWORD
+    udp: true
+    sni: cdn.example.com
+    client-fingerprint: chrome
+
+# 如使用在线 Clash YAML 订阅，可取消注释 proxy-providers：
+# proxy-providers:
+#   my-provider:
+#     type: http
+#     url: https://provider.example.com/subscribe?token=YOUR_TOKEN
+#     interval: 3600
+#     path: ./profiles/provider.yaml
+
+proxy-groups:
+  - name: 🏠 家庭内网
+    type: select
+    proxies:
+      - Tailscale
+      - DIRECT
+
+  - name: 🚀 节点选择
+    type: select
+    proxies:
+      - 🔄 自动选择
+      - 示例-VLESS-Reality
+      - 示例-Trojan
+      - DIRECT
+
+  - name: 🔄 自动选择
+    type: url-test
+    proxies:
+      - 示例-VLESS-Reality
+      - 示例-Trojan
+    url: http://www.gstatic.com/generate_204
+    interval: 300
+
+  - name: 🌍 国外流量
+    type: select
+    proxies:
+      - 🚀 节点选择
+      - 🔄 自动选择
+      - 示例-VLESS-Reality
+
+rules:
+  # Tailscale 控制面、DERP 与机场域名直连，避免回环
+  - DOMAIN-SUFFIX,tailscale.com,DIRECT
+  - DOMAIN-SUFFIX,tailscale.io,DIRECT
+  - DOMAIN,derp.example.com,DIRECT
+  - DOMAIN,proxy.example.com,DIRECT
+
+  # Tailscale 内网域名与 CGNAT 网段
+  - DOMAIN-SUFFIX,your-tailnet.ts.net,Tailscale
+  - DOMAIN-SUFFIX,ts.net,Tailscale
+  - IP-CIDR,100.64.0.0/10,Tailscale,no-resolve
+  - IP-CIDR6,fd7a:115c:a1e0::/48,Tailscale,no-resolve
+
+  # 家庭/内网子网（需要 tailnet 中已有 subnet router 广播 192.168.1.0/24）
+  - IP-CIDR,192.168.1.0/24,🏠 家庭内网,no-resolve
+
+  # 国内直连与代理兜底
+  - GEOIP,LAN,DIRECT,no-resolve
+  - GEOIP,CN,DIRECT
+  - MATCH,🌍 国外流量
