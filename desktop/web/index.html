@@ -1,0 +1,2278 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Clash Harmony Desktop — Mihomo + Tailscale</title>
+<style>
+  :root {
+    --bg: #0b1120;
+    --surface: #111827;
+    --surface-2: #1e293b;
+    --border: #263348;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --primary: #10b981;
+    --primary-hover: #059669;
+    --blue: #38bdf8;
+    --amber: #f59e0b;
+    --red: #ef4444;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .layout { display: flex; min-height: 100vh; }
+  .sidebar {
+    width: 224px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    padding: 20px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .brand {
+    padding: 4px 10px 16px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 8px;
+  }
+  .brand h1 { margin: 0; font-size: 17px; display: flex; align-items: center; gap: 8px; }
+  .brand .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .dot {
+    width: 10px; height: 10px; border-radius: 50%; display: inline-block;
+    background: var(--muted);
+  }
+  .dot.on { background: var(--primary); box-shadow: 0 0 8px var(--primary); }
+  .dot.warn { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+  .nav-btn {
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid transparent;
+    border-radius: 9px;
+    padding: 10px 12px;
+    font-size: 14px;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .nav-btn:hover { background: rgba(255,255,255,.04); color: var(--text); }
+  .nav-btn.active { background: rgba(16,185,129,.14); color: #6ee7b7; border-color: rgba(16,185,129,.32); font-weight: 600; }
+  .sidebar-foot { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+  .main { flex: 1; padding: 24px 28px; max-width: 1260px; width: 100%; }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap; margin-bottom: 20px;
+  }
+  .topbar h2 { margin: 0; font-size: 20px; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .btn {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .btn:hover { border-color: #475569; background: #273549; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-primary { background: var(--primary); border-color: var(--primary); color: #052e16; font-weight: 600; }
+  .btn-primary:hover { background: var(--primary-hover); }
+  .btn-danger { background: rgba(239,68,68,.16); border-color: rgba(239,68,68,.4); color: #fca5a5; }
+  .btn-danger:hover { background: rgba(239,68,68,.26); }
+  .btn-blue { background: rgba(56,189,248,.16); border-color: rgba(56,189,248,.4); color: #7dd3fc; }
+  .btn-amber { background: rgba(245,158,11,.16); border-color: rgba(245,158,11,.4); color: #fcd34d; }
+  .btn-sm { padding: 5px 10px; font-size: 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px;
+    margin-bottom: 16px;
+  }
+  .card h3 { margin: 0 0 12px; font-size: 15px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    background: var(--surface-2); color: var(--muted); border: 1px solid var(--border);
+  }
+  .badge.ok { background: rgba(16,185,129,.15); color: #6ee7b7; border-color: rgba(16,185,129,.35); }
+  .badge.warn { background: rgba(245,158,11,.15); color: #fcd34d; border-color: rgba(245,158,11,.35); }
+  .badge.err { background: rgba(239,68,68,.15); color: #fca5a5; border-color: rgba(239,68,68,.35); }
+  .badge.info { background: rgba(56,189,248,.15); color: #7dd3fc; border-color: rgba(56,189,248,.35); }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid rgba(255,255,255,.05); }
+  .row:last-child { border-bottom: none; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12.5px; }
+  input[type=text], input[type=number], input[type=password], textarea, select {
+    width: 100%;
+    background: #0f172a;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  textarea { min-height: 220px; font-family: ui-monospace, Consolas, monospace; font-size: 12px; resize: vertical; }
+  .field { margin-bottom: 12px; }
+  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+  .switch {
+    position: relative; display: inline-block; width: 42px; height: 22px; flex-shrink: 0;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; cursor: pointer; inset: 0; background: #334155;
+    border-radius: 999px; transition: .2s;
+  }
+  .slider:before {
+    content: ""; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px;
+    background: #fff; border-radius: 50%; transition: .2s;
+  }
+  .switch input:checked + .slider { background: var(--primary); }
+  .switch input:checked + .slider:before { transform: translateX(20px); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .chip {
+    background: #0f172a; border: 1px solid var(--border); border-radius: 7px;
+    padding: 3px 8px; font-size: 12px; font-family: ui-monospace, Consolas, monospace;
+  }
+  .proxy-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(185px, 1fr)); gap: 8px; }
+  .proxy-item {
+    background: #0f172a; border: 1px solid var(--border); border-radius: 9px;
+    padding: 10px 12px; cursor: pointer; transition: all .12s;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .proxy-item:hover { border-color: #475569; }
+  .proxy-item.selected { border-color: var(--primary); background: rgba(16,185,129,.1); }
+  .proxy-name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .proxy-meta { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
+  .delay-fast { color: #34d399; font-weight: 600; }
+  .delay-mid { color: #fbbf24; font-weight: 600; }
+  .delay-slow { color: #f87171; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid rgba(255,255,255,.06); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  .log-box {
+    background: #060a14; border: 1px solid var(--border); border-radius: 9px;
+    padding: 12px; height: 420px; overflow: auto;
+    font-family: ui-monospace, Consolas, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all;
+  }
+  .alert {
+    padding: 10px 14px; border-radius: 9px; margin-bottom: 14px; font-size: 13px;
+    background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.35); color: #fecaca;
+  }
+  .alert.warn { background: rgba(245,158,11,.12); border-color: rgba(245,158,11,.35); color: #fde68a; }
+  .alert.ok { background: rgba(16,185,129,.12); border-color: rgba(16,185,129,.35); color: #a7f3d0; }
+  .toast {
+    position: fixed; right: 20px; bottom: 20px; z-index: 999;
+    background: #1e293b; border: 1px solid #38bdf8; color: #f8fafc;
+    padding: 10px 16px; border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.45);
+    display: none; max-width: 420px;
+  }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+  .inline-form { display: flex; gap: 8px; align-items: center; }
+  .seg { display: inline-flex; background: #0f172a; border: 1px solid var(--border); border-radius: 8px; padding: 2px; }
+  .seg button {
+    background: transparent; border: none; color: var(--muted); padding: 5px 12px;
+    border-radius: 6px; cursor: pointer; font-size: 12px;
+  }
+  .seg button.active { background: var(--primary); color: #052e16; font-weight: 600; }
+  .hero-card {
+    background: linear-gradient(135deg, #111827 0%, #0f1f2e 100%);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 20px 22px;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    flex-wrap: wrap;
+    transition: border-color .2s, box-shadow .2s;
+  }
+  .hero-card.connected {
+    background: linear-gradient(135deg, #0b2220 0%, #111c2d 60%, #111827 100%);
+    border-color: rgba(16,185,129,.45);
+    box-shadow: 0 0 28px rgba(16,185,129,.09);
+  }
+  .hero-left { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+  .hero-power-btn {
+    width: 84px; height: 84px; border-radius: 50%; border: 2px solid rgba(16,185,129,.65);
+    background: radial-gradient(circle at 30% 30%, #10b981, #047857);
+    color: #ffffff; font-size: 15px; font-weight: 700; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+    box-shadow: 0 0 22px rgba(16,185,129,.35);
+    transition: transform .15s, box-shadow .15s, background .2s;
+    flex-shrink: 0;
+  }
+  .hero-power-btn:hover { transform: scale(1.04); box-shadow: 0 0 28px rgba(16,185,129,.5); }
+  .hero-power-btn:disabled { opacity: .6; cursor: wait; transform: none; }
+  .hero-power-btn.connected {
+    border-color: rgba(239,68,68,.7);
+    background: radial-gradient(circle at 30% 30%, #ef4444, #b91c1c);
+    box-shadow: 0 0 22px rgba(239,68,68,.32);
+  }
+  .hero-power-btn.connected:hover { box-shadow: 0 0 28px rgba(239,68,68,.5); }
+  .hero-title { font-size: 20px; font-weight: 700; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .hero-sub { font-size: 13px; color: var(--muted); margin-top: 5px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(118px, 1fr)); gap: 10px; flex: 1; min-width: 340px; }
+  .kpi-box {
+    background: rgba(15,23,42,.75); border: 1px solid rgba(148,163,184,.16);
+    border-radius: 11px; padding: 10px 12px;
+  }
+  .kpi-label { font-size: 11px; color: var(--muted); }
+  .kpi-val { font-size: 17px; font-weight: 700; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .kpi-sub { font-size: 11px; color: var(--muted); margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .active-nodes-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+  .active-node-tile {
+    background: #0f172a; border: 1px solid var(--border); border-radius: 10px;
+    padding: 11px 13px; display: flex; flex-direction: column; gap: 6px;
+  }
+  .active-node-tile.ai { border-color: rgba(16,185,129,.42); background: rgba(16,185,129,.06); }
+  .active-node-tile.ts { border-color: rgba(56,189,248,.4); background: rgba(56,189,248,.06); }
+  .bar-track { width: 100%; height: 6px; background: rgba(148,163,184,.14); border-radius: 999px; overflow: hidden; margin-top: 5px; }
+  .bar-fill { height: 100%; background: linear-gradient(90deg, #10b981, #38bdf8); border-radius: 999px; transition: width .3s; }
+  .traffic-split { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 16px; }
+  .conn-tag { cursor: pointer; transition: transform .12s, box-shadow .12s; }
+  .conn-tag:hover { transform: translateY(-1px); box-shadow: 0 0 0 1px rgba(16,185,129,.7); }
+  .conn-popover {
+    position: fixed;
+    z-index: 1200;
+    display: none;
+    width: 520px;
+    max-width: calc(100vw - 24px);
+    max-height: 360px;
+    overflow: hidden;
+    background: #0f172a;
+    border: 1px solid #38bdf8;
+    border-radius: 12px;
+    box-shadow: 0 14px 36px rgba(0,0,0,.65);
+    color: var(--text);
+    font-size: 12px;
+  }
+  .conn-popover-head {
+    padding: 9px 12px;
+    background: #162236;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-weight: 600;
+  }
+  .conn-popover-body {
+    max-height: 312px;
+    overflow-y: auto;
+    padding: 6px 10px;
+  }
+  .conn-pop-row {
+    padding: 6px 2px;
+    border-bottom: 1px solid rgba(255,255,255,.06);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .conn-pop-row:last-child { border-bottom: none; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <h1><span id="brandDot" class="dot"></span> Clash Harmony</h1>
+      <div class="sub" id="brandVer">Mihomo + Tailscale Desktop</div>
+    </div>
+    <button class="nav-btn active" data-tab="overview">总览 & 状态</button>
+    <button class="nav-btn" data-tab="proxies">代理策略组</button>
+    <button class="nav-btn" data-tab="tailscale">Tailscale 组网</button>
+    <button class="nav-btn" data-tab="overlay">自建与分流覆写</button>
+    <button class="nav-btn" data-tab="profiles">订阅与配置</button>
+    <button class="nav-btn" data-tab="logs">日志与诊断</button>
+    <div class="sidebar-foot">
+      <div id="sidePriv">权限检测中...</div>
+      <div id="sideDir" class="mono" style="margin-top:4px;word-break:break-all;font-size:11px;"></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <h2 id="pageTitle">总览 & 状态</h2>
+      <div class="actions">
+        <div class="seg" id="modeSeg">
+          <button data-mode="rule">规则</button>
+          <button data-mode="global">全局</button>
+          <button data-mode="direct">直连</button>
+        </div>
+        <button class="btn btn-primary" id="btnToggleCore">启动核心</button>
+        <button class="btn" id="btnRestartCore">重启</button>
+      </div>
+    </div>
+
+    <div id="globalErr" class="alert" style="display:none;"></div>
+
+    <!-- TAB 1: OVERVIEW -->
+    <section id="tab-overview" class="tab-pane active">
+      <!-- HERO CONNECTION BANNER (Mobile-inspired prominent status + live throughput) -->
+      <div id="heroCard" class="hero-card">
+        <div class="hero-left">
+          <button id="btnHeroToggle" class="hero-power-btn" title="一键连接 / 断开核心">
+            <span id="heroPowerIcon" style="font-size:22px;line-height:1;">⏻</span>
+            <span id="heroPowerText" style="font-size:13px;">连接</span>
+          </button>
+          <div>
+            <div class="hero-title">
+              <span id="heroStatusText">未连接</span>
+              <span id="heroModeBadge" class="badge">规则模式</span>
+              <span id="heroUptime" class="badge info">未运行</span>
+            </div>
+            <div class="hero-sub">
+              <span>配置：<b id="heroProfileName" style="color:#e2e8f0;">未选择</b></span>
+              <span>·</span>
+              <span>接管：<b id="heroTakeoverText" style="color:#94a3b8;">未接管</b></span>
+              <button class="btn btn-sm" id="btnHeroRestart" style="padding:3px 9px;font-size:11px;">重启核心</button>
+            </div>
+          </div>
+        </div>
+        <div class="kpi-grid">
+          <div class="kpi-box">
+            <div class="kpi-label">实时下行</div>
+            <div class="kpi-val" id="ovDownSpeed" style="color:#34d399;">0 B/s</div>
+            <div class="kpi-sub" id="ovDownTotal">累计 0 B</div>
+          </div>
+          <div class="kpi-box">
+            <div class="kpi-label">实时上行</div>
+            <div class="kpi-val" id="ovUpSpeed" style="color:#38bdf8;">0 B/s</div>
+            <div class="kpi-sub" id="ovUpTotal">累计 0 B</div>
+          </div>
+          <div class="kpi-box">
+            <div class="kpi-label">活跃连接</div>
+            <div class="kpi-val" id="ovConnCount">0</div>
+            <div class="kpi-sub" id="ovConnSub">等待流量</div>
+          </div>
+          <div class="kpi-box">
+            <div class="kpi-label">主出口延迟</div>
+            <div class="kpi-val" id="ovPrimaryDelay" style="color:#cbd5e1;">待测</div>
+            <div class="kpi-sub" id="ovPrimaryNode" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">-</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ACTIVE MIHOMO NODES & LATENCY -->
+      <div class="card">
+        <h3>
+          <span>🌐 当前 Mihomo 连接节点与延迟</span>
+          <div class="actions">
+            <button class="btn btn-primary btn-sm" id="btnTestActiveNodes">⚡ 测当前节点延迟</button>
+            <button class="btn btn-sm" onclick="switchTab('proxies')">切换节点 &rarr;</button>
+          </div>
+        </h3>
+        <div id="ovActiveNodesGrid" class="active-nodes-grid">
+          <div class="muted">核心未启动或正在加载当前出口节点...</div>
+        </div>
+      </div>
+
+      <!-- PER-NODE & SERVICE TRAFFIC STATS -->
+      <div class="card">
+        <h3>
+          <span>📊 各节点 / 服务流量统计（实时）</span>
+          <div class="actions">
+            <button class="btn btn-sm" id="btnResetTrafficStats">清空累计</button>
+            <button class="btn btn-danger btn-sm" id="btnCloseAllConns">断开全部连接</button>
+          </div>
+        </h3>
+        <div class="traffic-split">
+          <div>
+            <div class="muted" style="margin-bottom:8px;font-weight:600;color:#cbd5e1;">按出口节点 / 策略组汇总</div>
+            <div id="ovNodeTrafficBox" class="muted">核心启动并产生流量后自动显示各节点流量占比</div>
+          </div>
+          <div>
+            <div class="muted" style="margin-bottom:8px;font-weight:600;color:#cbd5e1;">活跃服务 / 目标域名 Top 10</div>
+            <div id="ovServiceTrafficBox" class="muted">暂无活跃服务连接</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <h3>
+            <span>核心与接管模式</span>
+            <span id="coreBadge" class="badge">检测中</span>
+          </h3>
+          <div class="row">
+            <div>
+              <div>当前生效配置</div>
+              <div class="muted" id="ovProfile">未选择</div>
+            </div>
+            <button class="btn btn-sm" onclick="switchTab('profiles')">切换</button>
+          </div>
+          <div class="row">
+            <div>
+              <div>系统代理 (127.0.0.1:<span id="ovPort">7890</span>)</div>
+              <div class="muted">免管理员，浏览器自动接管（含内网域）</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="swSysProxy"><span class="slider"></span></label>
+          </div>
+          <div class="row">
+            <div>
+              <div>TUN 全局接管 (Wintun)</div>
+              <div class="muted" id="ovTunHint">终端 / agy CLI / SSH / IDE 全量透明代理与组网</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <button class="btn btn-amber btn-sm" id="btnElevate" style="display:none;">管理员重启</button>
+              <label class="switch"><input type="checkbox" id="swTun"><span class="slider"></span></label>
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <div>Strict Route 防 DNS/IPv6 泄漏</div>
+              <div class="muted">通过 Windows WFP 强制 CLI 流量和 DNS 走 TUN（强烈推荐）</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="swStrictRoute"><span class="slider"></span></label>
+          </div>
+          <div class="row">
+            <div>
+              <div>全局禁 QUIC (UDP 443 REJECT 置顶)</div>
+              <div class="muted">避免 Google/Claude QUIC 断流，强制走稳定 TCP TLS</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="swBlockQuic"><span class="slider"></span></label>
+          </div>
+          <div class="row">
+            <div>
+              <div>TUN 协议栈</div>
+              <div class="muted">Windows 推荐 mixed（TCP 原生栈 + UDP gVisor）</div>
+            </div>
+            <select id="selTunStack" style="width:118px;">
+              <option value="mixed">mixed</option>
+              <option value="system">system</option>
+              <option value="gvisor">gvisor</option>
+            </select>
+          </div>
+          <div class="row">
+            <div>
+              <div>开机自启 (Windows 登录自动后台运行)</div>
+              <div class="muted">写入当前用户启动项</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="swAutoStart"><span class="slider"></span></label>
+          </div>
+          <div class="row">
+            <div>
+              <div>控制器地址 / 内核版本</div>
+              <div class="muted mono" id="ovMeta">-</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>
+            <span>Tailscale 内置状态</span>
+            <span id="tsBadge" class="badge">未启动</span>
+          </h3>
+          <div id="tsAuthBox" class="alert warn" style="display:none;">
+            <div style="font-weight:600;margin-bottom:6px;">需要 Tailscale 浏览器授权登录</div>
+            <div class="mono" id="tsAuthUrlText" style="word-break:break-all;margin-bottom:8px;"></div>
+            <div class="actions">
+              <a id="tsAuthLink" class="btn btn-primary btn-sm" target="_blank" rel="noopener">打开授权页</a>
+              <button class="btn btn-sm" id="btnCopyAuth">复制链接</button>
+            </div>
+          </div>
+          <div class="row">
+            <div>节点名称 / Tailnet</div>
+            <div class="mono" id="tsNodeInfo">-</div>
+          </div>
+          <div class="row">
+            <div>Tailscale IP</div>
+            <div class="mono" id="tsIPs">-</div>
+          </div>
+          <div class="row">
+            <div>在线节点 / 广播子网</div>
+            <div id="tsCounts">-</div>
+          </div>
+          <div class="row">
+            <div>自动同步 SplitDNS</div>
+            <div class="chips" id="tsSplitChips"></div>
+          </div>
+          <div id="tsHealthBox" class="muted" style="margin-top:8px;color:#fcd34d;"></div>
+          <div class="actions" style="margin-top:12px;">
+            <button class="btn btn-blue btn-sm" id="btnTsLogin">触发登录</button>
+            <button class="btn btn-danger btn-sm" id="btnTsLogout">登出节点</button>
+            <button class="btn btn-sm" onclick="switchTab('tailscale')">管理节点 &rarr;</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3><span>SplitDNS / MagicDNS 快速解析测试</span></h3>
+        <div class="inline-form">
+          <input type="text" id="dnsTestName" placeholder="例如: dsh-10.in.sjfarm.cc 或 mafit.q.sjfarm.cc" value="dsh-10.in.sjfarm.cc" />
+          <select id="dnsTestType" style="width:96px;"><option value="A">A</option><option value="AAAA">AAAA</option><option value="CNAME">CNAME</option></select>
+          <button class="btn btn-blue" id="btnDnsTest" style="white-space:nowrap;">测试解析</button>
+        </div>
+        <div id="dnsTestResult" class="mono muted" style="margin-top:10px;"></div>
+      </div>
+    </section>
+
+    <!-- TAB 2: PROXIES -->
+    <section id="tab-proxies" class="tab-pane">
+      <div class="card">
+        <h3><span>🔍 规则命中测试（实时查询 Mihomo 内核引擎）</span></h3>
+        <div class="inline-form">
+          <input type="text" id="ruleTestTarget" placeholder="输入域名、URL 或 IP（如 claude.ai / dsh-10.in.sjfarm.cc / 192.168.1.11）" value="claude.ai" />
+          <select id="ruleTestNet" style="width:92px;"><option value="tcp">TCP</option><option value="udp">UDP</option></select>
+          <button class="btn btn-blue" id="btnRuleTest" style="white-space:nowrap;">测试命中</button>
+        </div>
+        <div class="chips" style="margin-top:8px;">
+          <button class="btn btn-sm" onclick="quickRuleTest('claude.ai')">claude.ai</button>
+          <button class="btn btn-sm" onclick="quickRuleTest('oauth2.googleapis.com')">oauth2.googleapis.com</button>
+          <button class="btn btn-sm" onclick="quickRuleTest('dsh-10.in.sjfarm.cc')">dsh-10.in.sjfarm.cc</button>
+          <button class="btn btn-sm" onclick="quickRuleTest('mafit.q.sjfarm.cc')">mafit.q.sjfarm.cc</button>
+          <button class="btn btn-sm" onclick="quickRuleTest('192.168.1.11')">192.168.1.11</button>
+          <button class="btn btn-sm" onclick="quickRuleTest('www.baidu.com')">www.baidu.com</button>
+        </div>
+        <div id="ruleTestResult" class="mono muted" style="margin-top:10px;"></div>
+      </div>
+
+      <div class="card">
+        <h3>
+          <span>策略组与节点切换</span>
+          <div class="actions">
+            <button class="btn btn-primary btn-sm" id="btnTestAllProxies">⚡ 一键全量测速</button>
+            <button class="btn btn-sm" id="btnReloadProxies">刷新策略组</button>
+          </div>
+        </h3>
+        <div id="proxiesContainer" class="muted">核心未启动或暂无策略组</div>
+      </div>
+    </section>
+
+    <!-- TAB 3: TAILSCALE -->
+    <section id="tab-tailscale" class="tab-pane">
+      <div class="card">
+        <h3>
+          <span>Tailnet 节点列表</span>
+          <div class="actions">
+            <button class="btn btn-primary btn-sm" id="btnPingAllPeers">⚡ 一键 Ping 全部在线节点</button>
+            <button class="btn btn-sm" id="btnReloadTs">刷新</button>
+          </div>
+        </h3>
+        <div style="overflow-x:auto;">
+          <table>
+            <thead>
+              <tr><th>节点</th><th>Tailscale IP</th><th>状态</th><th>连接路径</th><th>广播子网</th><th>延迟 / 操作</th></tr>
+            </thead>
+            <tbody id="tsPeersBody"><tr><td colspan="6" class="muted">暂无数据</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <h3><span>SplitDNS 规则（Tailscale 后台下发）</span></h3>
+          <div id="tsSplitTable" class="muted">暂无 SplitDNS 规则</div>
+        </div>
+
+        <div class="card">
+          <h3><span>Tailscale 原生托管参数</span></h3>
+          <div class="row">
+            <div>由 App 自动注入 Tailscale 出站与 DNS 规则</div>
+            <label class="switch"><input type="checkbox" id="tsPrefManaged"><span class="slider"></span></label>
+          </div>
+          <div class="row">
+            <div>启用内置 Tailscale 出站</div>
+            <label class="switch"><input type="checkbox" id="tsPrefEnabled"><span class="slider"></span></label>
+          </div>
+          <div class="row">
+            <div>接收子网路由 (accept-routes)</div>
+            <label class="switch"><input type="checkbox" id="tsPrefRoutes"><span class="slider"></span></label>
+          </div>
+          <div class="row">
+            <div>自动注入 MagicDNS & 同步 SplitDNS</div>
+            <label class="switch"><input type="checkbox" id="tsPrefSplit"><span class="slider"></span></label>
+          </div>
+          <div class="field" style="margin-top:10px;">
+            <label>设备 Hostname</label>
+            <input type="text" id="tsPrefHost" />
+          </div>
+          <div class="field">
+            <label>Exit Node（留空则不用出口节点，可填 IP 或节点名）</label>
+            <input type="text" id="tsPrefExit" placeholder="例如 100.x.x.x" />
+          </div>
+          <div class="field">
+            <label>自定义 Control URL（官方 Tailscale 留空，Headscale 填地址）</label>
+            <input type="text" id="tsPrefControl" placeholder="留空默认官方控制面" />
+          </div>
+          <div class="field">
+            <label>Auth Key（可选，留空走浏览器扫码/交互登录）</label>
+            <input type="password" id="tsPrefAuthKey" placeholder="tskey-auth-..." />
+          </div>
+          <div class="field">
+            <label>SplitDNS 域名列表（逗号分隔，自动同步后会保留）</label>
+            <input type="text" id="tsPrefDomains" placeholder="in.sjfarm.cc, q.sjfarm.cc" />
+          </div>
+          <button class="btn btn-primary" id="btnSaveTsPrefs">保存并重启核心生效</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: OVERLAY (SELF-HOSTED + 1-CLICK AI STRICT + BACKUP) -->
+    <section id="tab-overlay" class="tab-pane">
+      <div class="card">
+        <h3>
+          <span>🛡️ AI 严格走自建节点（2 步极简配置 · 更新订阅永不覆盖）</span>
+          <span id="ovLayerBadge" class="badge">未启用</span>
+        </h3>
+
+        <div class="row">
+          <div>
+            <div><b>启用 AI 严格自建保护</b></div>
+            <div class="muted">自动创建独立策略组，所选 AI 流量强制走自建节点，<b>不可达直接断开（绝不漏给国内或 BitzNet）</b></div>
+          </div>
+          <label class="switch"><input type="checkbox" id="ovEnabled"><span class="slider"></span></label>
+        </div>
+
+        <div class="field" style="margin-top:14px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <label style="margin:0;color:#e2e8f0;font-weight:600;">第 1 步：勾选哪些 AI 必须走自建节点（默认已全选，点一下开关）</label>
+            <div class="actions">
+              <button class="btn btn-sm" id="btnAiSelectAll">全选</button>
+              <button class="btn btn-sm" id="btnAiSelectCore">仅 Claude + Gemini + OpenAI</button>
+            </div>
+          </div>
+          <div id="aiProvidersGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;"></div>
+        </div>
+
+        <div class="field" style="margin-top:16px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <label style="margin:0;color:#e2e8f0;font-weight:600;">第 2 步：填入你的自建落地节点（直接粘贴 <span class="mono">vless:// / trojan:// / ss://</span> 链接或 Clash YAML 均可）</label>
+            <button class="btn btn-sm" id="btnInsertSelfHostedTpl">填入 VLESS 示例</button>
+          </div>
+          <textarea id="ovProxiesYaml" style="min-height:130px;" placeholder="方式 A（最简单）：直接粘贴节点链接，一行一个，如 vless://...#东京自建&#10;方式 B：粘贴标准 Clash YAML 节点片段（- name: 东京落地 ...）"></textarea>
+        </div>
+
+        <details id="ovAdvancedBox" style="margin:12px 0;padding:10px 12px;border:1px solid #1e293b;border-radius:8px;background:#0b1220;">
+          <summary style="cursor:pointer;color:#94a3b8;font-size:13px;font-weight:600;">高级自定义（可选：自定义规则 / 补充 AI 域名 / 策略组名 / Fail-Closed 开关）</summary>
+          <div style="margin-top:12px;">
+            <div class="row">
+              <div>
+                <div>启用 AI 严格分流规则</div>
+                <div class="muted">关闭后仅注入自建节点与自定义规则，不生成 AI 置顶规则</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="ovAiStrict" checked><span class="slider"></span></label>
+            </div>
+            <div class="row">
+              <div>
+                <div>Fail-Closed 不可达直接断开（强安全，建议保持开启）</div>
+                <div class="muted">AI 策略组仅含自建节点（未填节点时回退 REJECT），绝不漏给 DIRECT 或商业节点</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="ovFailClosed" checked><span class="slider"></span></label>
+            </div>
+            <div class="grid" style="margin-top:10px;">
+              <div class="field">
+                <label>自建 AI 策略组名称</label>
+                <input type="text" id="ovGroupName" value="🛡️ AI严格自建" />
+              </div>
+              <div class="field">
+                <label>直连保护域名（自建节点的 server 域名已自动保护）</label>
+                <input type="text" id="ovDirectDomains" placeholder="derp.sjfarm.cc" />
+              </div>
+            </div>
+            <div class="grid">
+              <div class="field">
+                <label>自定义最高优先级规则（每行一条，如内网 CIDR / 直连域名）</label>
+                <textarea id="ovCustomRules" style="min-height:100px;" placeholder="IP-CIDR,192.168.1.0/24,Tailscale,no-resolve&#10;DOMAIN-SUFFIX,tuyacn.com,DIRECT"></textarea>
+              </div>
+              <div class="field">
+                <label>额外补充 AI 域名后缀（预设已内置主流 AI，此处仅需填额外域名）</label>
+                <textarea id="ovAiDomains" style="min-height:100px;" placeholder="留空即可使用上方一键预设"></textarea>
+              </div>
+            </div>
+            <div class="field">
+              <label>额外补充 AI 关键词（逗号分隔，可留空）</label>
+              <input type="text" id="ovAiKeywords" placeholder="留空即可" />
+            </div>
+          </div>
+        </details>
+
+        <div id="ovSaveStatus" class="muted" style="margin-bottom:10px;"></div>
+        <div class="actions">
+          <button class="btn btn-primary" id="btnSaveOverlay">一键保存并启用 AI 自建分流</button>
+          <button class="btn" id="btnReloadOverlay">重新加载</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3><span>🔄 双端配置备份与迁移（Windows ↔ 鸿蒙互通 JSON）</span></h3>
+        <div class="muted" style="margin-bottom:12px;">一键导出/导入自建节点、已选 AI 厂商、Tailscale 配置与订阅列表，方便在笔记本与鸿蒙手机之间同步。</div>
+        <div class="actions">
+          <button class="btn btn-blue" id="btnExportFull">导出完整迁移包 (.json)</button>
+          <button class="btn" id="btnExportSanitized">导出脱敏分享包 (.json)</button>
+          <label class="btn btn-primary" style="display:inline-flex;align-items:center;cursor:pointer;">
+            导入迁移包 (.json)
+            <input type="file" id="inpImportBundle" accept=".json" style="display:none;" />
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: PROFILES -->
+    <section id="tab-profiles" class="tab-pane">
+      <div class="card">
+        <h3>
+          <span>已保存的配置与订阅</span>
+          <div class="inline-form">
+            <span class="muted">自动更新：</span>
+            <select id="selAutoUpdate" style="width:110px;">
+              <option value="0">关闭</option>
+              <option value="6">每 6 小时</option>
+              <option value="12">每 12 小时</option>
+              <option value="24">每 24 小时</option>
+            </select>
+          </div>
+        </h3>
+        <div style="overflow-x:auto;">
+          <table>
+            <thead>
+              <tr><th>名称 / 流量到期</th><th>节点 / 组 / 规则</th><th>更新时间</th><th>操作</th></tr>
+            </thead>
+            <tbody id="profilesBody"><tr><td colspan="4" class="muted">暂无配置</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <h3><span>导入订阅链接 (URL)</span></h3>
+          <div class="field">
+            <label>配置名称</label>
+            <input type="text" id="impUrlName" placeholder="例如: BitzNet 原始订阅" />
+          </div>
+          <div class="field">
+            <label>Clash / Mihomo YAML 订阅地址</label>
+            <input type="text" id="impUrl" placeholder="https://..." />
+          </div>
+          <div class="field">
+            <label>拉取方式（解决国内/海外订阅 IP 限制）</label>
+            <select id="impFetchMode">
+              <option value="auto">自动（优先直连，失败自动走代理）</option>
+              <option value="direct">直连拉取（BitzNet 等防境外 IP 订阅推荐）</option>
+              <option value="proxy">走当前代理拉取（海外订阅推荐）</option>
+            </select>
+          </div>
+          <div id="impUrlStatus" class="muted" style="margin-bottom:8px;"></div>
+          <button class="btn btn-primary" id="btnImpUrl">下载、融合预校验并启用</button>
+        </div>
+
+        <div class="card">
+          <h3><span>导入或编辑本地 YAML</span></h3>
+          <div class="field inline-form">
+            <input type="text" id="impYamlName" placeholder="配置名称" />
+            <input type="file" id="impYamlFile" accept=".yaml,.yml,.txt" style="width:auto;" />
+          </div>
+          <input type="hidden" id="impEditId" value="" />
+          <div class="field">
+            <textarea id="impYamlText" placeholder="在此粘贴 Clash/Mihomo YAML，或点击上方选择本地 .yaml 文件..."></textarea>
+          </div>
+          <div id="validateMsg" class="muted" style="margin-bottom:10px;"></div>
+          <div class="actions">
+            <button class="btn" id="btnValidateYaml">校验 YAML</button>
+            <button class="btn btn-primary" id="btnSaveYaml">保存并启用</button>
+            <button class="btn btn-sm" id="btnClearEditor">清空新建</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: LOGS -->
+    <section id="tab-logs" class="tab-pane">
+      <div class="card">
+        <h3>
+          <span>Mihomo / Tailscale 实时日志</span>
+          <div class="inline-form">
+            <input type="text" id="logFilter" placeholder="关键字过滤 (如 tailscale / error)" style="width:220px;" />
+            <button class="btn btn-sm" id="btnRefreshLogs">刷新</button>
+          </div>
+        </h3>
+        <div id="logBox" class="log-box">暂无日志</div>
+      </div>
+
+      <div class="card">
+        <h3>
+          <span>当前生成的 runtime/current.yaml</span>
+          <button class="btn btn-sm" id="btnLoadRuntimeYaml">加载预览</button>
+        </h3>
+        <pre id="runtimeYamlBox" class="log-box" style="height:260px;">点击上方「加载预览」查看注入 Tailscale & SplitDNS 后的最终运行配置</pre>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="toast" class="toast"></div>
+<div id="connPopover" class="conn-popover"></div>
+
+<script>
+let currentTab = 'overview';
+let lastState = null;
+let lastTsStatus = null;
+let proxyDelays = {};
+let peerPingCache = {};
+let lastGroupsList = [];
+
+function toast(msg, isErr) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.style.borderColor = isErr ? '#ef4444' : '#10b981';
+  el.style.display = 'block';
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { el.style.display = 'none'; }, 3500);
+}
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const text = await res.text();
+  let data = {};
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (!res.ok && !data.error) data.error = 'HTTP ' + res.status;
+  return { ok: res.ok, status: res.status, data };
+}
+
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === 'tab-' + tab));
+  const titles = {
+    overview: '总览 & 状态',
+    proxies: '代理策略组',
+    tailscale: 'Tailscale 组网',
+    overlay: '自建与分流覆写',
+    profiles: '订阅与配置',
+    logs: '日志与诊断'
+  };
+  document.getElementById('pageTitle').textContent = titles[tab] || tab;
+  if (tab === 'overview') { loadState(); loadTailscaleStatus(); loadOverviewTelemetry(); }
+  if (tab === 'proxies') loadProxies();
+  if (tab === 'tailscale') { loadTailscaleStatus(); loadTsPrefs(); }
+  if (tab === 'overlay') loadOverlay();
+  if (tab === 'profiles') loadProfiles();
+  if (tab === 'logs') loadLogs();
+}
+
+document.querySelectorAll('.nav-btn').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
+
+async function loadState() {
+  const { ok, data } = await api('/api/state');
+  if (!ok) return;
+  lastState = data;
+
+  document.getElementById('brandVer').textContent = (data.version || '') + ' · ' + (data.coreVersion || '');
+  document.getElementById('brandDot').className = 'dot ' + (data.running ? 'on' : '');
+  document.getElementById('sidePriv').innerHTML = data.elevated
+    ? '<span class="badge ok">管理员模式 (支持 TUN)</span>'
+    : '<span class="badge">标准用户 (系统代理可用)</span>';
+  document.getElementById('sideDir').textContent = data.dataDir || '';
+
+  const errEl = document.getElementById('globalErr');
+  if (data.lastError) {
+    errEl.textContent = data.lastError;
+    errEl.style.display = 'block';
+  } else {
+    errEl.style.display = 'none';
+  }
+
+  const badge = document.getElementById('coreBadge');
+  badge.textContent = data.running ? (data.tunActive ? '运行中 (TUN)' : (data.systemProxyActive ? '运行中 (系统代理)' : '运行中')) : '已停止';
+  badge.className = 'badge ' + (data.running ? 'ok' : '');
+
+  const btn = document.getElementById('btnToggleCore');
+  btn.textContent = data.running ? '停止核心' : '启动核心';
+  btn.className = 'btn ' + (data.running ? 'btn-danger' : 'btn-primary');
+
+  // Update prominent Hero Connection Card
+  const heroCard = document.getElementById('heroCard');
+  const heroBtn = document.getElementById('btnHeroToggle');
+  const heroText = document.getElementById('heroPowerText');
+  const heroStatus = document.getElementById('heroStatusText');
+  const heroTakeover = document.getElementById('heroTakeoverText');
+  const heroUptime = document.getElementById('heroUptime');
+  const heroProfile = document.getElementById('heroProfileName');
+  if (heroCard && heroBtn) {
+    heroCard.classList.toggle('connected', !!data.running);
+    heroBtn.classList.toggle('connected', !!data.running);
+    heroText.textContent = data.running ? '断开' : '连接';
+    heroStatus.textContent = data.running ? '已连接' : '未连接';
+    heroStatus.style.color = data.running ? '#34d399' : '#f8fafc';
+    const takeoverParts = [];
+    if (data.tunActive) takeoverParts.push('TUN 全局');
+    if (data.systemProxyActive) takeoverParts.push('系统代理');
+    heroTakeover.textContent = data.running ? (takeoverParts.join(' + ') || '仅本地端口') : '未接管';
+    heroTakeover.style.color = data.running ? '#6ee7b7' : '#94a3b8';
+    heroProfile.textContent = data.activeProfileName || '未导入配置';
+    if (data.running && data.startedAt) {
+      const sec = Math.max(0, Math.floor((Date.now() - new Date(data.startedAt).getTime()) / 1000));
+      heroUptime.textContent = '已运行 ' + formatUptimeSec(sec);
+      heroUptime.className = 'badge ok';
+    } else {
+      heroUptime.textContent = '未运行';
+      heroUptime.className = 'badge';
+    }
+  }
+
+  document.getElementById('ovProfile').textContent = data.activeProfileName || '未导入配置';
+  document.getElementById('ovPort').textContent = data.mixedPort || 7890;
+  document.getElementById('ovMeta').textContent = `${data.controllerAddr} | ${data.coreVersion}`;
+  document.getElementById('swSysProxy').checked = !!data.systemProxy;
+  document.getElementById('swTun').checked = !!data.tunMode;
+  document.getElementById('swStrictRoute').checked = data.strictRoute !== false;
+  document.getElementById('swBlockQuic').checked = data.blockQuic !== false;
+  document.getElementById('selTunStack').value = data.tunStack || 'mixed';
+  document.getElementById('swAutoStart').checked = !!data.startWithWindows;
+  const autoUpd = document.getElementById('selAutoUpdate');
+  if (autoUpd) autoUpd.value = String(data.autoUpdateHours || 0);
+  document.getElementById('btnElevate').style.display = (!data.elevated) ? 'inline-block' : 'none';
+
+  if (data.running) {
+    loadClashMode();
+  } else {
+    resetOverviewDisconnectedUI();
+  }
+}
+
+function formatUptimeSec(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}h ${String(m).padStart(2,'0')}m ${String(s).padStart(2,'0')}s`;
+  if (m > 0) return `${m}m ${String(s).padStart(2,'0')}s`;
+  return `${s}s`;
+}
+
+function formatHumanBytes(b) {
+  const v = Number(b) || 0;
+  if (v < 1024) return `${Math.round(v)} B`;
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+  if (v < 1024 * 1024 * 1024) return `${(v / (1024 * 1024)).toFixed(2)} MB`;
+  return `${(v / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatHumanSpeed(bps) {
+  const v = Math.max(0, Number(bps) || 0);
+  if (v < 1024) return `${Math.round(v)} B/s`;
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB/s`;
+  return `${(v / (1024 * 1024)).toFixed(2)} MB/s`;
+}
+
+async function loadClashMode() {
+  const { ok, data } = await api('/clash/configs');
+  if (!ok || !data.mode) return;
+  const mode = String(data.mode).toLowerCase();
+  document.querySelectorAll('#modeSeg button').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === mode);
+  });
+  const modeMap = { rule: '规则模式', global: '全局模式', direct: '直连模式' };
+  const mb = document.getElementById('heroModeBadge');
+  if (mb) mb.textContent = modeMap[mode] || mode;
+}
+
+document.querySelectorAll('#modeSeg button').forEach(b => {
+  b.addEventListener('click', async () => {
+    const mode = b.dataset.mode;
+    const { ok, data } = await api('/clash/configs', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode })
+    });
+    if (ok) { toast('已切换到 ' + mode + ' 模式'); loadClashMode(); }
+    else toast(data.error || '切换失败', true);
+  });
+});
+
+async function handleToggleCoreAction() {
+  const path = (lastState && lastState.running) ? '/api/core/stop' : '/api/core/start';
+  const heroBtn = document.getElementById('btnHeroToggle');
+  const topBtn = document.getElementById('btnToggleCore');
+  if (heroBtn) heroBtn.disabled = true;
+  if (topBtn) topBtn.disabled = true;
+  const { ok, data } = await api(path, { method: 'POST' });
+  if (heroBtn) heroBtn.disabled = false;
+  if (topBtn) topBtn.disabled = false;
+  if (!ok) toast(data.error || '操作失败', true);
+  else toast(path.endsWith('stop') ? '核心已停止，系统代理已恢复' : '核心已启动');
+  await loadState();
+  await loadTailscaleStatus();
+  if (lastState && lastState.running) {
+    loadOverviewTelemetry();
+  }
+}
+
+async function handleRestartCoreAction() {
+  const { ok, data } = await api('/api/core/restart', { method: 'POST' });
+  if (!ok) toast(data.error || '重启失败', true);
+  else toast('核心已重启');
+  await loadState();
+  await loadTailscaleStatus();
+  if (lastState && lastState.running) {
+    loadOverviewTelemetry();
+  }
+}
+
+document.getElementById('btnToggleCore').addEventListener('click', handleToggleCoreAction);
+document.getElementById('btnHeroToggle').addEventListener('click', handleToggleCoreAction);
+document.getElementById('btnRestartCore').addEventListener('click', handleRestartCoreAction);
+document.getElementById('btnHeroRestart').addEventListener('click', handleRestartCoreAction);
+
+document.getElementById('swSysProxy').addEventListener('change', async (e) => {
+  const { ok, data } = await api('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ systemProxy: e.target.checked })
+  });
+  if (!ok) { toast(data.error || '设置失败', true); e.target.checked = !e.target.checked; }
+  else toast(e.target.checked ? '已开启系统代理' : '已关闭系统代理');
+  loadState();
+});
+
+document.getElementById('swTun').addEventListener('change', async (e) => {
+  const want = e.target.checked;
+  const { ok, data } = await api('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tunMode: want })
+  });
+  if (!ok) {
+    e.target.checked = !want;
+    if (data.needElevation) {
+      if (confirm('开启 TUN 全局接管需要管理员权限，是否立即以管理员身份重启 Clash Harmony 并开启 TUN？')) {
+        await api('/api/elevate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ enableTun: true }) });
+        toast('请在弹出的 UAC 窗口中点击「是」...');
+      }
+      return;
+    }
+    toast(data.error || 'TUN 切换失败', true);
+  } else {
+    toast(want ? 'TUN 全局接管已开启' : 'TUN 模式已关闭');
+  }
+  loadState();
+});
+
+document.getElementById('btnElevate').addEventListener('click', async () => {
+  const { ok, data } = await api('/api/elevate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enableTun: true })
+  });
+  toast(ok ? '正在请求管理员提权并开启 TUN...' : (data.error || '提权失败'), !ok);
+});
+
+document.getElementById('swStrictRoute').addEventListener('change', async (e) => {
+  const { ok, data } = await api('/api/settings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ strictRoute: e.target.checked })
+  });
+  if (!ok) { toast(data.error || '设置失败', true); e.target.checked = !e.target.checked; }
+  else toast(e.target.checked ? '已开启 Strict Route 并生效' : '已关闭 Strict Route');
+  loadState();
+});
+
+document.getElementById('swBlockQuic').addEventListener('change', async (e) => {
+  const { ok, data } = await api('/api/settings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ blockQuic: e.target.checked })
+  });
+  if (!ok) { toast(data.error || '设置失败', true); e.target.checked = !e.target.checked; }
+  else toast(e.target.checked ? '已开启全局 QUIC 拦截并置顶' : '已关闭自动 QUIC 拦截');
+  loadState();
+});
+
+document.getElementById('selTunStack').addEventListener('change', async (e) => {
+  const { ok, data } = await api('/api/settings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tunStack: e.target.value })
+  });
+  toast(ok ? ('TUN 协议栈已切换为 ' + e.target.value) : (data.error || '切换失败'), !ok);
+  loadState();
+});
+
+document.getElementById('swAutoStart').addEventListener('change', async (e) => {
+  const { ok, data } = await api('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ startWithWindows: e.target.checked })
+  });
+  if (!ok) { toast(data.error || '设置开机自启失败', true); e.target.checked = !e.target.checked; }
+  else toast(e.target.checked ? '已开启开机自启' : '已取消开机自启');
+  loadState();
+});
+
+async function loadTailscaleStatus() {
+  const { ok, data } = await api('/tailscale/status');
+  if (!ok) return;
+  lastTsStatus = data;
+
+  const badge = document.getElementById('tsBadge');
+  const st = data.backendState || 'Unknown';
+  badge.textContent = st === 'Running' ? '已连接 (Running)' : (st === 'NeedsLogin' ? '待登录 (NeedsLogin)' : st);
+  badge.className = 'badge ' + (st === 'Running' ? 'ok' : (st === 'NeedsLogin' ? 'warn' : (st === 'Unavailable' ? '' : 'info')));
+
+  const authBox = document.getElementById('tsAuthBox');
+  if (data.authUrl) {
+    authBox.style.display = 'block';
+    document.getElementById('tsAuthUrlText').textContent = data.authUrl;
+    document.getElementById('tsAuthLink').href = data.authUrl;
+  } else {
+    authBox.style.display = 'none';
+  }
+
+  document.getElementById('tsNodeInfo').textContent = [data.hostname, data.tailnetName].filter(Boolean).join(' @ ') || '-';
+  document.getElementById('tsIPs').textContent = (data.tailscaleIPs || []).join(', ') || '-';
+  const onlinePeers = (data.peers || []).filter(p => p.online).length;
+  document.getElementById('tsCounts').textContent = `${onlinePeers} / ${(data.peers || []).length} 在线 · ${(data.advertisedRoutes || []).length} 条子网路由`;
+
+  const chips = document.getElementById('tsSplitChips');
+  if ((data.splitDns || []).length > 0) {
+    chips.innerHTML = data.splitDns.map(s => `<span class="chip">${esc(s.domain)} &rarr; ${esc((s.nameservers||[]).join(','))}</span>`).join('');
+  } else {
+    chips.innerHTML = '<span class="muted">无</span>';
+  }
+
+  const healthEl = document.getElementById('tsHealthBox');
+  const warnings = [];
+  if (data.lastError) warnings.push(data.lastError);
+  (data.health || []).forEach(h => warnings.push(h));
+  healthEl.textContent = warnings.join(' | ');
+
+  // Render Tailscale tab tables
+  const tbody = document.getElementById('tsPeersBody');
+  const peers = data.peers || [];
+  if (peers.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="muted">暂无节点数据（请先启动核心并登录 Tailscale）</td></tr>';
+  } else {
+    tbody.innerHTML = peers.map(p => {
+      const ip = (p.tailscaleIPs || [])[0] || '';
+      const path = p.curAddr ? `直连 ${esc(p.curAddr)}` : (p.relay ? `DERP ${esc(p.relay)}` : '-');
+      const routes = (p.primaryRoutes || []).join(', ') || '-';
+      const cachedPing = ip ? peerPingCache[ip] : null;
+      const pingLabel = cachedPing ? cachedPing : 'Ping';
+      return `<tr>
+        <td><b>${esc(p.hostName)}</b><div class="muted mono">${esc(p.dnsName)}</div></td>
+        <td class="mono">${esc(ip)}</td>
+        <td><span class="badge ${p.online ? 'ok' : ''}">${p.online ? '在线' : '离线'}</span></td>
+        <td class="mono">${path}</td>
+        <td class="mono">${esc(routes)}</td>
+        <td>${ip ? `<button class="btn btn-sm" id="pingBtn-${esc(ip.replace(/[^a-zA-Z0-9]/g,'_'))}" onclick="pingPeer('${esc(ip)}', this)">${esc(pingLabel)}</button>` : '-'}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  const splitBox = document.getElementById('tsSplitTable');
+  if ((data.splitDns || []).length === 0) {
+    splitBox.innerHTML = '<div class="muted">当前 Tailnet 未下发自定义 SplitDNS 域名</div>';
+  } else {
+    splitBox.innerHTML = '<table><thead><tr><th>域名后缀</th><th>上游 DNS</th></tr></thead><tbody>' +
+      data.splitDns.map(s => `<tr><td class="mono">+.${esc(s.domain)}</td><td class="mono">${esc((s.nameservers||[]).join(', '))}</td></tr>`).join('') +
+      '</tbody></table>';
+  }
+}
+
+async function pingPeer(ip, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '测速中...'; }
+  const { data } = await api('/tailscale/ping', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ip })
+  });
+  if (btn) btn.disabled = false;
+  if (data.ok) {
+    const via = data.direct ? ('直连') : ('DERP ' + data.derpRegionCode);
+    const label = `${data.latencyMs.toFixed(1)} ms (${via})`;
+    peerPingCache[ip] = label;
+    if (btn) btn.textContent = label;
+    return { ok: true, ip, label };
+  } else {
+    peerPingCache[ip] = '超时';
+    if (btn) btn.textContent = '超时';
+    return { ok: false, ip, error: data.error };
+  }
+}
+
+document.getElementById('btnPingAllPeers').addEventListener('click', async () => {
+  const peers = (lastTsStatus && lastTsStatus.peers || []).filter(p => p.online && (p.tailscaleIPs || []).length > 0);
+  if (peers.length === 0) { toast('暂无在线 Tailscale 节点可测速', true); return; }
+  const btn = document.getElementById('btnPingAllPeers');
+  btn.disabled = true;
+  btn.textContent = `测速中 (0/${peers.length})...`;
+  let done = 0;
+  let okCnt = 0;
+  await Promise.all(peers.map(async (p) => {
+    const ip = p.tailscaleIPs[0];
+    const rowBtn = document.getElementById('pingBtn-' + ip.replace(/[^a-zA-Z0-9]/g, '_'));
+    const r = await pingPeer(ip, rowBtn);
+    done++;
+    if (r.ok) okCnt++;
+    btn.textContent = `测速中 (${done}/${peers.length})...`;
+  }));
+  btn.disabled = false;
+  btn.textContent = '⚡ 一键 Ping 全部在线节点';
+  toast(`Tailscale 批量 Ping 完成：${okCnt}/${peers.length} 节点可达`);
+});
+
+document.getElementById('btnCopyAuth').addEventListener('click', () => {
+  if (lastTsStatus && lastTsStatus.authUrl) {
+    navigator.clipboard.writeText(lastTsStatus.authUrl);
+    toast('授权链接已复制');
+  }
+});
+
+document.getElementById('btnTsLogin').addEventListener('click', async () => {
+  const { ok, data } = await api('/tailscale/login', { method: 'POST' });
+  toast(ok ? '已触发交互式登录，请等待授权链接出现' : (data.error || '触发失败'), !ok);
+  setTimeout(loadTailscaleStatus, 800);
+});
+
+document.getElementById('btnTsLogout').addEventListener('click', async () => {
+  if (!confirm('确认登出当前内置 Tailscale 节点？')) return;
+  const { ok, data } = await api('/tailscale/logout', { method: 'POST' });
+  toast(ok ? '已登出 Tailscale 节点' : (data.error || '登出失败'), !ok);
+  setTimeout(loadTailscaleStatus, 600);
+});
+
+document.getElementById('btnDnsTest').addEventListener('click', async () => {
+  const name = document.getElementById('dnsTestName').value.trim();
+  const type = document.getElementById('dnsTestType').value;
+  const out = document.getElementById('dnsTestResult');
+  out.textContent = '正在查询 Tailscale SplitDNS...';
+  const { data } = await api('/tailscale/dns-query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, type })
+  });
+  if (data.ok) {
+    out.style.color = '#6ee7b7';
+    out.textContent = `OK (${data.latencyMs.toFixed(1)} ms) | 解析结果: ${(data.answers||[]).join(', ')} | Resolver: ${(data.resolvers||[]).join(', ')}`;
+  } else {
+    out.style.color = '#fca5a5';
+    out.textContent = `失败: ${data.error || '未知错误'}`;
+  }
+});
+
+async function loadTsPrefs() {
+  const { ok, data } = await api('/api/tailscale/prefs');
+  if (!ok) return;
+  document.getElementById('tsPrefManaged').checked = !!data.managedByApp;
+  document.getElementById('tsPrefEnabled').checked = !!data.enabled;
+  document.getElementById('tsPrefRoutes').checked = !!data.acceptRoutes;
+  document.getElementById('tsPrefSplit').checked = !!data.autoSyncSplitDns;
+  document.getElementById('tsPrefHost').value = data.hostname || '';
+  document.getElementById('tsPrefExit').value = data.exitNode || '';
+  document.getElementById('tsPrefControl').value = data.controlUrl || '';
+  document.getElementById('tsPrefAuthKey').value = data.authKey || '';
+  document.getElementById('tsPrefDomains').value = (data.splitDnsDomains || []).join(', ');
+}
+
+document.getElementById('btnSaveTsPrefs').addEventListener('click', async () => {
+  const domains = document.getElementById('tsPrefDomains').value
+    .split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
+  const prefs = {
+    managedByApp: document.getElementById('tsPrefManaged').checked,
+    enabled: document.getElementById('tsPrefEnabled').checked,
+    proxyName: 'Tailscale',
+    hostname: document.getElementById('tsPrefHost').value.trim(),
+    controlUrl: document.getElementById('tsPrefControl').value.trim(),
+    acceptRoutes: document.getElementById('tsPrefRoutes').checked,
+    exitNode: document.getElementById('tsPrefExit').value.trim(),
+    exitNodeAllowLan: true,
+    authKey: document.getElementById('tsPrefAuthKey').value.trim(),
+    autoInjectMagicDns: document.getElementById('tsPrefSplit').checked,
+    tailnetSuffix: (lastTsStatus && lastTsStatus.magicDnsSuffix) || '',
+    autoSyncSplitDns: document.getElementById('tsPrefSplit').checked,
+    splitDnsDomains: domains
+  };
+  const { ok, data } = await api('/api/tailscale/prefs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prefs, restart: true })
+  });
+  toast(ok ? 'Tailscale 参数已保存并生效' : (data.error || '保存失败'), !ok);
+  loadState();
+  setTimeout(loadTailscaleStatus, 1000);
+});
+
+async function loadProxies() {
+  const container = document.getElementById('proxiesContainer');
+  const { ok, data } = await api('/clash/proxies');
+  if (!ok || !data.proxies) {
+    lastGroupsList = [];
+    container.innerHTML = '<div class="muted">核心未启动，请先启动核心后再切换策略组</div>';
+    return;
+  }
+  const all = data.proxies;
+  const groups = Object.values(all).filter(p => Array.isArray(p.all) && p.all.length > 0 && p.name !== 'GLOBAL');
+  lastGroupsList = groups;
+  if (groups.length === 0) {
+    container.innerHTML = '<div class="muted">当前配置暂无策略组</div>';
+    return;
+  }
+  container.innerHTML = groups.map(g => {
+    const items = g.all.map(name => {
+      const node = all[name] || {};
+      const sel = g.now === name;
+      const delay = proxyDelays[name];
+      let delayHtml = '';
+      if (delay === -1) delayHtml = '<span class="delay-slow">超时</span>';
+      else if (typeof delay === 'number') {
+        const cls = delay < 180 ? 'delay-fast' : (delay < 450 ? 'delay-mid' : 'delay-slow');
+        delayHtml = `<span class="${cls}">${delay} ms</span>`;
+      }
+      return `<div class="proxy-item ${sel ? 'selected' : ''}" onclick="selectProxy('${encodeURIComponent(g.name)}','${encodeURIComponent(name)}')">
+        <div class="proxy-name" title="${esc(name)}">${esc(name)}</div>
+        <div class="proxy-meta"><span>${esc(node.type || '')}</span>${delayHtml}</div>
+      </div>`;
+    }).join('');
+    return `<div style="margin-bottom:20px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <div><b>${esc(g.name)}</b> <span class="badge">${esc(g.type)}</span> <span class="muted">当前: ${esc(g.now)}</span></div>
+        <button class="btn btn-sm" onclick="testGroupDelay('${encodeURIComponent(g.name)}', this)">测速</button>
+      </div>
+      <div class="proxy-grid">${items}</div>
+    </div>`;
+  }).join('');
+}
+
+async function runRuleTest() {
+  const target = document.getElementById('ruleTestTarget').value.trim();
+  const network = document.getElementById('ruleTestNet').value || 'tcp';
+  const out = document.getElementById('ruleTestResult');
+  if (!target) {
+    out.style.color = '#fca5a5';
+    out.textContent = '请输入域名、URL 或 IP';
+    return;
+  }
+  out.style.color = '#94a3b8';
+  out.textContent = '正在查询 Mihomo 实时规则引擎...';
+  const { ok, data } = await api('/config/rule-test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target, network })
+  });
+  if (ok && data.ok) {
+    const chainStr = (data.proxyChain || []).join(' → ') || data.finalOutbound || '-';
+    const isReject = (data.finalOutbound || '').toUpperCase() === 'REJECT' || (data.finalType || '').toLowerCase() === 'reject';
+    const ruleLabel = data.ruleRaw || (data.ruleType + (data.rulePayload ? ',' + data.rulePayload : ''));
+    out.style.color = isReject ? '#fca5a5' : '#6ee7b7';
+    out.innerHTML = `目标 <b>${esc(data.target)}</b> (${esc(data.network)}:${data.port}) ` +
+      `| 模式: <span class="badge info">${esc(data.mode)}</span> ` +
+      `| 命中规则: <b>${esc(ruleLabel)}</b> ` +
+      `| 实际链路: <b>${esc(chainStr)}</b> <span class="badge ${isReject ? 'err' : 'ok'}">${esc(data.finalType || data.finalOutbound)}</span>`;
+  } else {
+    out.style.color = '#fca5a5';
+    out.textContent = '规则测试失败: ' + (data.error || '请确认核心已启动');
+  }
+}
+
+function quickRuleTest(target) {
+  document.getElementById('ruleTestTarget').value = target;
+  runRuleTest();
+}
+
+document.getElementById('btnRuleTest').addEventListener('click', runRuleTest);
+document.getElementById('ruleTestTarget').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') runRuleTest();
+});
+
+document.getElementById('btnTestAllProxies').addEventListener('click', async () => {
+  if (!lastGroupsList || lastGroupsList.length === 0) {
+    await loadProxies();
+  }
+  const groups = (lastGroupsList || []).filter(g => Array.isArray(g.all) && g.all.length > 0);
+  if (groups.length === 0) {
+    toast('当前没有可测速的策略组，请先启动核心', true);
+    return;
+  }
+  const btn = document.getElementById('btnTestAllProxies');
+  btn.disabled = true;
+  let done = 0;
+  let testedNodes = 0;
+  btn.textContent = `全量测速中 (0/${groups.length})...`;
+  await Promise.all(groups.map(async (g) => {
+    const { ok, data } = await api(`/clash/group/${encodeURIComponent(g.name)}/delay?url=${encodeURIComponent('http://www.gstatic.com/generate_204')}&timeout=4000`);
+    if (ok && data && typeof data === 'object') {
+      const entries = Object.entries(data);
+      entries.forEach(([k, v]) => { proxyDelays[k] = v; });
+      testedNodes += entries.length;
+    }
+    done++;
+    btn.textContent = `全量测速中 (${done}/${groups.length})...`;
+  }));
+  btn.disabled = false;
+  btn.textContent = '⚡ 一键全量测速';
+  await loadProxies();
+  toast(`全量测速完成：覆盖 ${groups.length} 个策略组，获得 ${testedNodes} 条节点延迟`);
+});
+
+async function selectProxy(encGroup, encName) {
+  const group = decodeURIComponent(encGroup);
+  const name = decodeURIComponent(encName);
+  const { ok, data } = await api('/clash/proxies/' + encodeURIComponent(group), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name })
+  });
+  if (ok) { toast(`${group} → ${name}`); loadProxies(); }
+  else toast(data.error || '切换失败', true);
+}
+
+async function testGroupDelay(encGroup, btn) {
+  const group = decodeURIComponent(encGroup);
+  btn.disabled = true;
+  btn.textContent = '测速中...';
+  const { ok, data } = await api(`/clash/group/${encodeURIComponent(group)}/delay?url=${encodeURIComponent('http://www.gstatic.com/generate_204')}&timeout=4000`);
+  btn.disabled = false;
+  btn.textContent = '测速';
+  if (ok && data && typeof data === 'object') {
+    Object.entries(data).forEach(([k, v]) => { proxyDelays[k] = v; });
+    loadProxies();
+  } else {
+    toast('测速失败: ' + (data.error || ''), true);
+  }
+}
+
+document.getElementById('btnReloadProxies').addEventListener('click', loadProxies);
+document.getElementById('btnReloadTs').addEventListener('click', loadTailscaleStatus);
+
+function formatBytesGB(bytes) {
+  if (!bytes || bytes <= 0) return '0 GB';
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+}
+
+function formatUserinfoBadge(ui) {
+  if (!ui) return '';
+  const parts = [];
+  if (ui.total > 0) {
+    const used = (ui.upload || 0) + (ui.download || 0);
+    const pct = Math.min(100, Math.round((used / ui.total) * 100));
+    parts.push(`已用 ${formatBytesGB(used)} / ${formatBytesGB(ui.total)} (${pct}%)`);
+  }
+  if (ui.expire > 0) {
+    const d = new Date(ui.expire * 1000);
+    parts.push(`到期 ${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+  }
+  return parts.length ? `<div class="muted" style="margin-top:3px;">${esc(parts.join(' · '))}</div>` : '';
+}
+
+function formatFetchModeBadge(mode) {
+  if (!mode || mode === 'auto') return '<span class="badge">自动拉取</span>';
+  if (mode === 'direct') return '<span class="badge ok">直连拉取</span>';
+  if (mode === 'proxy') return '<span class="badge info">代理拉取</span>';
+  return `<span class="badge">${esc(mode)}</span>`;
+}
+
+async function loadProfiles() {
+  const { ok, data } = await api('/api/profiles');
+  if (!ok) return;
+  const tbody = document.getElementById('profilesBody');
+  const list = data.profiles || [];
+  if (list.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" class="muted">尚未导入配置，请在下方导入订阅链接或本地 YAML 文件</td></tr>';
+    return;
+  }
+  tbody.innerHTML = list.map(p => {
+    const active = p.id === data.activeId;
+    return `<tr>
+      <td>
+        <b>${esc(p.name)}</b> ${active ? '<span class="badge ok">当前生效</span>' : ''} ${p.url ? formatFetchModeBadge(p.fetchMode) : ''}
+        <div class="muted mono">${esc(p.url || '本地 YAML')}</div>
+        ${formatUserinfoBadge(p.userinfo)}
+      </td>
+      <td class="mono">${p.proxyCount} 节点 / ${p.groupCount} 组 / ${p.ruleCount} 规则</td>
+      <td class="muted">${esc((p.updatedAt || '').replace('T',' ').slice(0,19))}</td>
+      <td>
+        <div class="actions">
+          ${!active ? `<button class="btn btn-primary btn-sm" onclick="activateProfile('${esc(p.id)}')">启用</button>` : ''}
+          ${p.url ? `<button class="btn btn-sm" onclick="refreshProfile('${esc(p.id)}', this)">更新</button>` : ''}
+          <button class="btn btn-sm" onclick="editProfile('${esc(p.id)}')">编辑</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteProfile('${esc(p.id)}')">删除</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+document.getElementById('selAutoUpdate').addEventListener('change', async (e) => {
+  const hours = parseInt(e.target.value, 10) || 0;
+  const { ok, data } = await api('/api/settings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ autoUpdateHours: hours })
+  });
+  toast(ok ? (hours > 0 ? `已设置每 ${hours} 小时自动更新订阅` : '已关闭定时自动更新') : (data.error || '设置失败'), !ok);
+  loadState();
+});
+
+async function activateProfile(id) {
+  const { ok, data } = await api('/api/profiles/activate', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ id })
+  });
+  toast(ok ? '已切换生效配置' : (data.error || '切换失败'), !ok);
+  loadProfiles(); loadState();
+}
+
+async function refreshProfile(id, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '更新中...'; }
+  toast('正在拉取订阅并进行融合预校验...');
+  const { ok, data } = await api('/api/profiles/refresh', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ id })
+  });
+  if (btn) { btn.disabled = false; btn.textContent = '更新'; }
+  toast(ok ? '订阅更新成功（已保留自建节点与AI规则）' : (data.error || '更新失败'), !ok);
+  loadProfiles(); loadState();
+}
+
+async function editProfile(id) {
+  const { ok, data } = await api('/api/profiles?id=' + encodeURIComponent(id));
+  if (!ok) { toast(data.error || '读取失败', true); return; }
+  document.getElementById('impEditId').value = data.profile.id;
+  document.getElementById('impYamlName').value = data.profile.name;
+  document.getElementById('impYamlText').value = data.content || '';
+  toast('已载入编辑器');
+}
+
+async function deleteProfile(id) {
+  if (!confirm('确认删除该配置？')) return;
+  const { ok, data } = await api('/api/profiles?id=' + encodeURIComponent(id), { method: 'DELETE' });
+  toast(ok ? '已删除' : (data.error || '删除失败'), !ok);
+  loadProfiles(); loadState();
+}
+
+document.getElementById('btnImpUrl').addEventListener('click', async () => {
+  const name = document.getElementById('impUrlName').value.trim();
+  const url = document.getElementById('impUrl').value.trim();
+  const fetchMode = document.getElementById('impFetchMode').value || 'auto';
+  const statusEl = document.getElementById('impUrlStatus');
+  if (!url) { toast('请输入订阅 URL', true); return; }
+  const btn = document.getElementById('btnImpUrl');
+  btn.disabled = true;
+  statusEl.style.color = '#94a3b8';
+  statusEl.textContent = '正在下载订阅并进行融合预校验...';
+  const { ok, data } = await api('/api/profiles/import', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name, url, fetchMode, activate: true })
+  });
+  btn.disabled = false;
+  if (ok) {
+    statusEl.style.color = '#6ee7b7';
+    statusEl.textContent = `导入成功：${data.profile ? data.profile.name : ''}（${data.profile ? data.profile.proxyCount : 0} 节点，融合校验通过）`;
+    toast('订阅导入成功');
+    document.getElementById('impUrl').value = '';
+    loadProfiles(); loadState();
+  } else {
+    statusEl.style.color = '#fca5a5';
+    statusEl.textContent = '导入失败: ' + (data.error || '未知错误');
+    toast(data.error || '导入失败', true);
+  }
+});
+
+// ================= OVERLAY & CROSS-PLATFORM BACKUP =================
+let aiPresetsCache = [
+  { id: 'claude', label: 'Claude', subtitle: 'Anthropic / Claude.ai / Claude Code' },
+  { id: 'gemini', label: 'Gemini / Antigravity', subtitle: 'Gemini / AI Studio / Antigravity / Google AI' },
+  { id: 'openai', label: 'OpenAI / ChatGPT', subtitle: 'ChatGPT / API / Sora / Codex' },
+  { id: 'cursor', label: 'Cursor / Copilot', subtitle: 'Cursor IDE / GitHub Copilot / Codeium' },
+  { id: 'xai', label: 'Grok / xAI', subtitle: 'x.ai / grok.com' },
+  { id: 'other_ai', label: '其他 AI', subtitle: 'Perplexity / OpenRouter / Groq / Mistral / Poe / HF' }
+];
+let selectedAiProviders = new Set(['claude', 'gemini', 'openai', 'cursor', 'xai', 'other_ai']);
+
+function renderAiProvidersGrid() {
+  const grid = document.getElementById('aiProvidersGrid');
+  if (!grid) return;
+  grid.innerHTML = aiPresetsCache.map(p => {
+    const active = selectedAiProviders.has(p.id);
+    return `<div onclick="toggleAiProvider('${esc(p.id)}')" style="cursor:pointer;padding:10px 12px;border-radius:8px;border:1px solid ${active ? '#10b981' : '#334155'};background:${active ? 'rgba(16,185,129,0.12)' : '#0b1220'};transition:all .15s;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <b style="color:${active ? '#6ee7b7' : '#cbd5e1'};">${active ? '✓ ' : ''}${esc(p.label)}</b>
+        <span class="badge ${active ? 'ok' : ''}" style="font-size:11px;">${active ? '走自建' : '未选'}</span>
+      </div>
+      <div class="muted" style="font-size:11px;margin-top:4px;">${esc(p.subtitle || '')}</div>
+    </div>`;
+  }).join('');
+}
+
+function toggleAiProvider(id) {
+  if (selectedAiProviders.has(id)) selectedAiProviders.delete(id);
+  else selectedAiProviders.add(id);
+  renderAiProvidersGrid();
+}
+
+document.getElementById('btnAiSelectAll').addEventListener('click', () => {
+  selectedAiProviders = new Set(aiPresetsCache.map(p => p.id));
+  renderAiProvidersGrid();
+});
+
+document.getElementById('btnAiSelectCore').addEventListener('click', () => {
+  selectedAiProviders = new Set(['claude', 'gemini', 'openai']);
+  renderAiProvidersGrid();
+});
+
+async function loadOverlay() {
+  const { ok, data } = await api('/api/overlay');
+  if (!ok) return;
+  const ov = data.overlay || data;
+  if (Array.isArray(data.presets) && data.presets.length > 0) {
+    aiPresetsCache = data.presets;
+  }
+  const providers = Array.isArray(ov.aiProviders) ? ov.aiProviders : aiPresetsCache.map(p => p.id);
+  selectedAiProviders = new Set(providers);
+  renderAiProvidersGrid();
+
+  document.getElementById('ovEnabled').checked = !!ov.enabled;
+  document.getElementById('ovAiStrict').checked = ov.aiStrictEnabled !== false;
+  document.getElementById('ovFailClosed').checked = ov.failClosed !== false;
+  document.getElementById('ovGroupName').value = ov.selfHostedGroupName || '🛡️ AI严格自建';
+  document.getElementById('ovDirectDomains').value = (ov.directDomains || []).join(', ');
+  document.getElementById('ovProxiesYaml').value = ov.customProxiesYaml || '';
+  document.getElementById('ovCustomRules').value = (ov.customRules || []).join('\n');
+  document.getElementById('ovAiDomains').value = (ov.aiDomains || []).join('\n');
+  document.getElementById('ovAiKeywords').value = (ov.aiKeywords || []).join(', ');
+  const badge = document.getElementById('ovLayerBadge');
+  badge.textContent = ov.enabled
+    ? `已启用 · ${selectedAiProviders.size} 家 AI${ov.failClosed !== false ? ' · Fail-Closed' : ''}`
+    : '未启用';
+  badge.className = 'badge ' + (ov.enabled ? 'ok' : '');
+}
+
+document.getElementById('btnInsertSelfHostedTpl').addEventListener('click', () => {
+  const ta = document.getElementById('ovProxiesYaml');
+  const tpl = `- name: 东京自建稳定出口\n  type: vless\n  server: your-node.example.com\n  port: 443\n  uuid: 00000000-0000-0000-0000-000000000000\n  network: ws\n  tls: true\n  udp: true\n  servername: your-node.example.com\n  client-fingerprint: chrome\n  ws-opts:\n    path: /ws\n    headers:\n      Host: your-node.example.com`;
+  ta.value = ta.value.trim() ? (ta.value.trim() + '\n' + tpl) : tpl;
+  toast('已插入 VLESS 节点模板，也可直接粘贴 vless:// / trojan:// / ss:// 链接');
+});
+
+document.getElementById('btnReloadOverlay').addEventListener('click', async () => {
+  await loadOverlay();
+  toast('已重新加载配置');
+});
+
+document.getElementById('btnSaveOverlay').addEventListener('click', async () => {
+  const statusEl = document.getElementById('ovSaveStatus');
+  const btn = document.getElementById('btnSaveOverlay');
+  const splitList = (s) => s.split(/[\r\n,;]+/).map(x => x.trim()).filter(Boolean);
+  const splitLines = (s) => s.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+  const proxiesRaw = document.getElementById('ovProxiesYaml').value;
+  // Auto-enable when user clicks "一键保存并启用" with self-hosted nodes filled in
+  let wantEnabled = document.getElementById('ovEnabled').checked;
+  if (!wantEnabled && proxiesRaw.trim().length > 0) {
+    wantEnabled = true;
+    document.getElementById('ovEnabled').checked = true;
+  }
+  const overlay = {
+    enabled: wantEnabled,
+    selfHostedGroupName: document.getElementById('ovGroupName').value.trim() || '🛡️ AI严格自建',
+    failClosed: document.getElementById('ovFailClosed').checked,
+    aiStrictEnabled: document.getElementById('ovAiStrict').checked,
+    aiProviders: Array.from(selectedAiProviders),
+    aiDomains: splitList(document.getElementById('ovAiDomains').value),
+    aiKeywords: splitList(document.getElementById('ovAiKeywords').value),
+    customProxiesYaml: proxiesRaw,
+    customRules: splitLines(document.getElementById('ovCustomRules').value),
+    directDomains: splitList(document.getElementById('ovDirectDomains').value)
+  };
+  btn.disabled = true;
+  statusEl.style.color = '#94a3b8';
+  statusEl.textContent = '正在解析自建节点并与当前订阅融合校验...';
+  const { ok, data } = await api('/api/overlay', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ overlay, restart: true })
+  });
+  btn.disabled = false;
+  if (ok) {
+    const names = (data.customProxyNames || []);
+    const modeNote = !overlay.enabled
+      ? '覆写保护已关闭'
+      : (overlay.aiStrictEnabled && overlay.failClosed
+        ? (names.length > 0
+          ? `已选 ${overlay.aiProviders.length} 家 AI 严格走 [${names.join(', ')}]，不可达直接断开`
+          : `已选 ${overlay.aiProviders.length} 家 AI（未填自建节点，当前 Fail-Closed 直接 REJECT）`)
+        : '已应用自定义规则');
+    statusEl.style.color = '#6ee7b7';
+    statusEl.textContent = `保存并融合校验成功！自建节点 ${names.length} 个 · ${modeNote}`;
+    toast('AI 自建分流已保存并生效');
+    loadOverlay();
+    loadState();
+  } else {
+    statusEl.style.color = '#fca5a5';
+    statusEl.textContent = '保存失败: ' + (data.error || '未知错误');
+    toast(data.error || '保存失败', true);
+  }
+});
+
+function downloadBackup(sanitize) {
+  window.location.href = '/api/backup/export?sanitize=' + (sanitize ? '1' : '0');
+}
+
+document.getElementById('btnExportFull').addEventListener('click', () => downloadBackup(false));
+document.getElementById('btnExportSanitized').addEventListener('click', () => downloadBackup(true));
+
+document.getElementById('inpImportBundle').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  try {
+    const text = await f.text();
+    const { ok, data } = await api('/api/backup/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: text
+    });
+    if (ok) {
+      toast(`导入迁移包成功！已导入 ${data.importedProfiles || 0} 个配置并同步覆写层/Tailscale`);
+      loadOverlay();
+      loadTsPrefs();
+      loadProfiles();
+      loadState();
+    } else {
+      toast(data.error || '导入迁移包失败', true);
+    }
+  } catch (err) {
+    toast('读取迁移包失败: ' + err, true);
+  }
+});
+
+document.getElementById('impYamlFile').addEventListener('change', (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  if (!document.getElementById('impYamlName').value.trim()) {
+    document.getElementById('impYamlName').value = f.name.replace(/\.(yaml|yml|txt)$/i, '');
+  }
+  const reader = new FileReader();
+  reader.onload = () => { document.getElementById('impYamlText').value = reader.result || ''; };
+  reader.readAsText(f);
+});
+
+document.getElementById('btnValidateYaml').addEventListener('click', async () => {
+  const text = document.getElementById('impYamlText').value;
+  const { data } = await api('/config/validate', { method: 'POST', body: text });
+  const el = document.getElementById('validateMsg');
+  if (data.ok) {
+    el.style.color = '#6ee7b7';
+    el.textContent = `校验通过: ${data.proxyCount} 节点, ${data.groupCount} 策略组, ${data.ruleCount} 规则, DNS=${data.dnsMode}` +
+      ((data.warnings||[]).length ? ` | 提示: ${data.warnings.join('; ')}` : '');
+  } else {
+    el.style.color = '#fca5a5';
+    el.textContent = `校验失败${data.line ? ' (第 ' + data.line + ' 行)' : ''}: ${data.error}`;
+  }
+});
+
+document.getElementById('btnSaveYaml').addEventListener('click', async () => {
+  const id = document.getElementById('impEditId').value.trim();
+  const name = document.getElementById('impYamlName').value.trim();
+  const content = document.getElementById('impYamlText').value;
+  const { ok, data } = await api('/api/profiles/import', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ id, name, content, activate: true })
+  });
+  toast(ok ? '配置已保存并设为生效' : (data.error || '保存失败'), !ok);
+  if (ok) { loadProfiles(); loadState(); }
+});
+
+document.getElementById('btnClearEditor').addEventListener('click', () => {
+  document.getElementById('impEditId').value = '';
+  document.getElementById('impYamlName').value = '';
+  document.getElementById('impYamlText').value = '';
+  document.getElementById('validateMsg').textContent = '';
+});
+
+async function loadLogs() {
+  const { ok, data } = await api('/api/logs');
+  if (!ok) return;
+  const kw = document.getElementById('logFilter').value.trim().toLowerCase();
+  const lines = (data.lines || []).filter(l => !kw || l.toLowerCase().includes(kw));
+  const box = document.getElementById('logBox');
+  box.textContent = lines.length ? lines.join('\n') : '暂无匹配日志';
+  box.scrollTop = box.scrollHeight;
+}
+
+document.getElementById('btnRefreshLogs').addEventListener('click', loadLogs);
+document.getElementById('logFilter').addEventListener('input', loadLogs);
+document.getElementById('btnLoadRuntimeYaml').addEventListener('click', async () => {
+  const { data } = await api('/api/runtime-yaml');
+  document.getElementById('runtimeYamlBox').textContent = data.ok ? data.content : (data.error || '读取失败');
+});
+
+// ================= OVERVIEW LIVE TELEMETRY (ACTIVE NODES + LATENCY + TRAFFIC) =================
+let ovLastSampleAt = 0;
+let ovLastDownTotal = 0;
+let ovLastUpTotal = 0;
+let ovConnSeen = {}; // connId -> { down, up, nodeKey, serviceKey }
+let ovNodeTotals = {}; // nodeKey -> { node, group, down, up, active, lastDown, lastUp }
+let ovServiceTotals = {}; // host -> { host, chain, rule, down, up, active }
+let ovActiveNodesList = [];
+let ovActiveConnsByNode = {}; // nodeKey -> ConnectionSummary[]
+let ovActiveConnsByService = {}; // host -> ConnectionSummary[]
+let connPopoverState = { open: false, kind: '', key: '', title: '', hideTimer: null };
+
+function formatConnDuration(startIso) {
+  if (!startIso) return '';
+  const ts = new Date(startIso).getTime();
+  if (!ts || isNaN(ts)) return '';
+  const sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  return formatUptimeSec(sec);
+}
+
+function renderConnPopoverContent() {
+  const pop = document.getElementById('connPopover');
+  if (!pop || !connPopoverState.open) return;
+  const list = connPopoverState.kind === 'node'
+    ? (ovActiveConnsByNode[connPopoverState.key] || [])
+    : (ovActiveConnsByService[connPopoverState.key] || []);
+  const sorted = [...list].sort((a, b) => (b.down + b.up) - (a.down + a.up));
+  const head = `<div class="conn-popover-head">
+    <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(connPopoverState.title)}</span>
+    <span class="badge ok" style="flex-shrink:0;">${sorted.length} 条活跃连接</span>
+  </div>`;
+  if (sorted.length === 0) {
+    pop.innerHTML = head + '<div class="conn-popover-body"><div class="muted" style="padding:10px 2px;">当前连接已关闭或暂无活跃连接</div></div>';
+    return;
+  }
+  const rowsHtml = sorted.slice(0, 40).map(c => {
+    const procTag = c.process ? `<span class="badge info" style="font-size:10px;padding:1px 6px;">${esc(c.process)}</span>` : '';
+    const netTag = `<span class="badge" style="font-size:10px;padding:1px 6px;">${esc(c.network)}</span>`;
+    const dur = c.start ? formatConnDuration(c.start) : '';
+    return `<div class="conn-pop-row">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <div style="display:flex;align-items:center;gap:5px;min-width:0;">
+          ${netTag}${procTag}
+          <span class="mono" style="font-weight:600;color:#f1f5f9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(c.target)}">${esc(c.target)}</span>
+        </div>
+        <span class="mono" style="white-space:nowrap;font-size:11px;">
+          <span style="color:#34d399;">↓${formatHumanBytes(c.down)}</span>
+          <span class="muted">/</span>
+          <span style="color:#38bdf8;">↑${formatHumanBytes(c.up)}</span>
+        </span>
+      </div>
+      <div class="muted" style="display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(c.rule)} | ${esc(c.chain)}">${esc(c.rule)} · ${esc(c.chain)}</span>
+        <span style="white-space:nowrap;flex-shrink:0;">${esc(dur)}</span>
+      </div>
+    </div>`;
+  }).join('');
+  const moreHint = sorted.length > 40 ? `<div class="muted" style="text-align:center;padding:6px 0;">仅显示前 40 条（共 ${sorted.length} 条）</div>` : '';
+  pop.innerHTML = head + `<div class="conn-popover-body">${rowsHtml}${moreHint}</div>`;
+}
+
+function showConnPopover(el, kind, encKey, encTitle) {
+  clearTimeout(connPopoverState.hideTimer);
+  const key = decodeURIComponent(encKey);
+  const title = decodeURIComponent(encTitle);
+  connPopoverState.open = true;
+  connPopoverState.kind = kind;
+  connPopoverState.key = key;
+  connPopoverState.title = title;
+  const pop = document.getElementById('connPopover');
+  renderConnPopoverContent();
+  pop.style.display = 'block';
+
+  const rect = el.getBoundingClientRect();
+  const popW = pop.offsetWidth || 520;
+  const popH = pop.offsetHeight || 240;
+  let left = rect.left;
+  if (left + popW > window.innerWidth - 12) {
+    left = Math.max(12, window.innerWidth - popW - 12);
+  }
+  let top = rect.bottom + 8;
+  if (top + popH > window.innerHeight - 12) {
+    top = Math.max(12, rect.top - popH - 8);
+  }
+  pop.style.left = `${left}px`;
+  pop.style.top = `${top}px`;
+}
+
+function scheduleHideConnPopover() {
+  clearTimeout(connPopoverState.hideTimer);
+  connPopoverState.hideTimer = setTimeout(() => {
+    connPopoverState.open = false;
+    const pop = document.getElementById('connPopover');
+    if (pop) pop.style.display = 'none';
+  }, 180);
+}
+
+(function initConnPopoverEvents() {
+  const pop = document.getElementById('connPopover');
+  if (!pop) return;
+  pop.addEventListener('mouseenter', () => clearTimeout(connPopoverState.hideTimer));
+  pop.addEventListener('mouseleave', scheduleHideConnPopover);
+})();
+
+function resetOverviewTrafficAccumulator() {
+  ovConnSeen = {};
+  ovNodeTotals = {};
+  ovServiceTotals = {};
+}
+
+function resetOverviewDisconnectedUI() {
+  document.getElementById('ovDownSpeed').textContent = '0 B/s';
+  document.getElementById('ovUpSpeed').textContent = '0 B/s';
+  document.getElementById('ovConnCount').textContent = '0';
+  document.getElementById('ovConnSub').textContent = '核心已停止';
+  document.getElementById('ovPrimaryDelay').textContent = '未连接';
+  document.getElementById('ovPrimaryDelay').style.color = '#94a3b8';
+  document.getElementById('ovPrimaryNode').textContent = '-';
+  document.getElementById('ovActiveNodesGrid').innerHTML = '<div class="muted">点击上方「连接」启动核心后显示当前 Mihomo 出口节点与延迟</div>';
+}
+
+function resolveFinalNodeFromMap(allMap, startName) {
+  let cur = startName;
+  const visited = new Set();
+  while (cur && allMap[cur] && allMap[cur].now && !visited.has(cur)) {
+    visited.add(cur);
+    cur = allMap[cur].now;
+  }
+  return cur || startName || '';
+}
+
+function delayBadgeHtml(val) {
+  if (val === 'testing') return '<span class="badge info">测速中...</span>';
+  if (val === -1) return '<span class="badge err">超时</span>';
+  if (typeof val === 'number' && val > 0) {
+    const cls = val < 180 ? 'ok' : (val < 450 ? 'warn' : 'err');
+    return `<span class="badge ${cls}">${val} ms</span>`;
+  }
+  return '<span class="badge">待测</span>';
+}
+
+async function testSingleNodeDelay(encName, btn) {
+  const name = decodeURIComponent(encName);
+  if (btn) { btn.disabled = true; btn.textContent = '...'; }
+  proxyDelays[name] = 'testing';
+  const { ok, data } = await api(`/clash/proxies/${encodeURIComponent(name)}/delay?url=${encodeURIComponent('http://www.gstatic.com/generate_204')}&timeout=4000`);
+  if (ok && data && typeof data.delay === 'number' && data.delay > 0) {
+    proxyDelays[name] = data.delay;
+  } else {
+    proxyDelays[name] = -1;
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '测速'; }
+  renderOverviewActiveNodes();
+}
+
+function renderOverviewActiveNodes() {
+  const box = document.getElementById('ovActiveNodesGrid');
+  if (!box) return;
+  if (!ovActiveNodesList || ovActiveNodesList.length === 0) {
+    box.innerHTML = '<div class="muted">当前配置暂无策略组</div>';
+    return;
+  }
+  // Update Hero Primary Node & Delay KPI (prefer AI Strict or main proxy group)
+  const primary = ovActiveNodesList.find(x => x.isAI) || ovActiveNodesList[0];
+  if (primary) {
+    const pDelay = proxyDelays[primary.finalNode];
+    const elVal = document.getElementById('ovPrimaryDelay');
+    const elSub = document.getElementById('ovPrimaryNode');
+    elSub.textContent = `${primary.group} → ${primary.finalNode}`;
+    if (typeof pDelay === 'number' && pDelay > 0) {
+      elVal.textContent = `${pDelay} ms`;
+      elVal.style.color = pDelay < 180 ? '#34d399' : (pDelay < 450 ? '#fbbf24' : '#f87171');
+    } else if (pDelay === -1) {
+      elVal.textContent = '超时';
+      elVal.style.color = '#f87171';
+    } else {
+      elVal.textContent = '点击测速';
+      elVal.style.color = '#cbd5e1';
+    }
+  }
+
+  box.innerHTML = ovActiveNodesList.map(item => {
+    const delayVal = proxyDelays[item.finalNode];
+    const canTest = item.finalNode && item.finalNode !== 'DIRECT' && item.finalNode !== 'REJECT' && item.finalType !== 'Tailscale';
+    const tileCls = item.isAI ? 'ai' : (item.isTS ? 'ts' : '');
+    const tsExtra = item.isTS && lastTsStatus
+      ? `<span class="badge ${lastTsStatus.backendState === 'Running' ? 'ok' : 'warn'}">${esc(lastTsStatus.backendState === 'Running' ? '已组网' : (lastTsStatus.backendState || '未知'))}</span>`
+      : delayBadgeHtml(delayVal);
+    return `<div class="active-node-tile ${tileCls}">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">
+        <span class="muted" style="font-weight:600;color:#cbd5e1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(item.group)}</span>
+        ${tsExtra}
+      </div>
+      <div style="font-weight:700;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(item.finalNode)}">${esc(item.finalNode)}</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-top:2px;">
+        <span class="muted mono">${esc(item.finalType || item.groupType)}</span>
+        ${canTest ? `<button class="btn btn-sm" style="padding:2px 8px;font-size:11px;" onclick="testSingleNodeDelay('${encodeURIComponent(item.finalNode)}', this)">测速</button>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function loadOverviewActiveNodes() {
+  const { ok, data } = await api('/clash/proxies');
+  if (!ok || !data.proxies) return;
+  const all = data.proxies;
+  const items = [];
+  const groups = Object.values(all).filter(p => Array.isArray(p.all) && p.all.length > 0 && p.name !== 'GLOBAL');
+  // Sort: AI Strict first, then primary selector groups (non-URLTest/Fallback), then others
+  groups.sort((a, b) => {
+    const score = (g) => {
+      if (g.name.includes('AI')) return 0;
+      if (g.type === 'Selector') return 1;
+      return 2;
+    };
+    return score(a) - score(b);
+  });
+  const seenGroup = new Set();
+  for (const g of groups) {
+    if (seenGroup.has(g.name)) continue;
+    seenGroup.add(g.name);
+    const finalNode = resolveFinalNodeFromMap(all, g.now);
+    const nodeObj = all[finalNode] || {};
+    // Read latest Mihomo history delay if we haven't tested manually yet
+    if (proxyDelays[finalNode] === undefined && Array.isArray(nodeObj.history) && nodeObj.history.length > 0) {
+      const lastH = nodeObj.history[nodeObj.history.length - 1];
+      if (lastH && typeof lastH.delay === 'number' && lastH.delay > 0) {
+        proxyDelays[finalNode] = lastH.delay;
+      }
+    }
+    items.push({
+      group: g.name,
+      groupType: g.type,
+      finalNode,
+      finalType: nodeObj.type || '',
+      isAI: g.name.includes('AI'),
+      isTS: nodeObj.type === 'Tailscale'
+    });
+  }
+  // Always surface Tailscale outbound tile if present in proxies
+  const tsNode = Object.values(all).find(p => p && p.type === 'Tailscale');
+  if (tsNode && !items.some(x => x.isTS)) {
+    items.push({
+      group: 'Tailscale 内网组网',
+      groupType: 'Tailscale',
+      finalNode: tsNode.name,
+      finalType: 'Tailscale',
+      isAI: false,
+      isTS: true
+    });
+  }
+  ovActiveNodesList = items;
+  renderOverviewActiveNodes();
+}
+
+async function loadOverviewConnections() {
+  const { ok, data } = await api('/clash/connections');
+  if (!ok || !data) return;
+
+  const now = Date.now();
+  const downTotal = Number(data.downloadTotal) || 0;
+  const upTotal = Number(data.uploadTotal) || 0;
+  if (ovLastSampleAt > 0 && now > ovLastSampleAt && downTotal >= ovLastDownTotal && upTotal >= ovLastUpTotal) {
+    const dtSec = (now - ovLastSampleAt) / 1000;
+    document.getElementById('ovDownSpeed').textContent = formatHumanSpeed((downTotal - ovLastDownTotal) / dtSec);
+    document.getElementById('ovUpSpeed').textContent = formatHumanSpeed((upTotal - ovLastUpTotal) / dtSec);
+  }
+  ovLastSampleAt = now;
+  ovLastDownTotal = downTotal;
+  ovLastUpTotal = upTotal;
+  document.getElementById('ovDownTotal').textContent = '累计 ' + formatHumanBytes(downTotal);
+  document.getElementById('ovUpTotal').textContent = '累计 ' + formatHumanBytes(upTotal);
+
+  const conns = Array.isArray(data.connections) ? data.connections : [];
+  document.getElementById('ovConnCount').textContent = String(conns.length);
+  document.getElementById('ovConnSub').textContent = conns.length > 0 ? '实时活跃连接' : '当前空闲';
+
+  // Reset active counters and per-tick speed deltas
+  Object.values(ovNodeTotals).forEach(v => { v.active = 0; v.deltaDown = 0; v.deltaUp = 0; });
+  Object.values(ovServiceTotals).forEach(v => { v.active = 0; });
+  ovActiveConnsByNode = {};
+  ovActiveConnsByService = {};
+
+  const liveIds = new Set();
+  for (const c of conns) {
+    const id = c.id || '';
+    liveIds.add(id);
+    const chains = Array.isArray(c.chains) ? c.chains : [];
+    // Mihomo chains order is [finalNode, ..., topGroup]
+    const finalNode = chains.length > 0 ? chains[0] : 'DIRECT';
+    const topGroup = chains.length > 1 ? chains[chains.length - 1] : finalNode;
+    const nodeKey = `${finalNode}||${topGroup}`;
+
+    const md = c.metadata || {};
+    const host = md.host || md.destinationIP || 'unknown';
+    const dstPort = md.destinationPort ? `:${md.destinationPort}` : '';
+    const rule = c.rule ? (c.rule + (c.rulePayload ? `(${c.rulePayload})` : '')) : '-';
+    const connSummary = {
+      id,
+      target: host + dstPort,
+      network: (md.network || 'tcp').toUpperCase(),
+      process: md.process || '',
+      rule,
+      chain: chains.slice().reverse().join(' → ') || finalNode,
+      down: Number(c.download) || 0,
+      up: Number(c.upload) || 0,
+      start: c.start || ''
+    };
+    if (!ovActiveConnsByNode[nodeKey]) ovActiveConnsByNode[nodeKey] = [];
+    ovActiveConnsByNode[nodeKey].push(connSummary);
+    if (!ovActiveConnsByService[host]) ovActiveConnsByService[host] = [];
+    ovActiveConnsByService[host].push(connSummary);
+
+    const cDown = Number(c.download) || 0;
+    const cUp = Number(c.upload) || 0;
+    const prev = ovConnSeen[id] || { down: 0, up: 0 };
+    const dDown = Math.max(0, cDown - prev.down);
+    const dUp = Math.max(0, cUp - prev.up);
+    ovConnSeen[id] = { down: cDown, up: cUp };
+
+    if (!ovNodeTotals[nodeKey]) {
+      ovNodeTotals[nodeKey] = { node: finalNode, group: topGroup, down: 0, up: 0, active: 0, deltaDown: 0, deltaUp: 0 };
+    }
+    ovNodeTotals[nodeKey].down += dDown;
+    ovNodeTotals[nodeKey].up += dUp;
+    ovNodeTotals[nodeKey].active += 1;
+    ovNodeTotals[nodeKey].deltaDown += dDown;
+    ovNodeTotals[nodeKey].deltaUp += dUp;
+
+    if (!ovServiceTotals[host]) {
+      ovServiceTotals[host] = { host, node: finalNode, group: topGroup, rule, down: 0, up: 0, active: 0 };
+    }
+    ovServiceTotals[host].node = finalNode;
+    ovServiceTotals[host].group = topGroup;
+    ovServiceTotals[host].rule = rule;
+    ovServiceTotals[host].down += dDown;
+    ovServiceTotals[host].up += dUp;
+    ovServiceTotals[host].active += 1;
+  }
+
+  // Prune closed connection IDs from ovConnSeen so memory stays bounded
+  for (const id of Object.keys(ovConnSeen)) {
+    if (!liveIds.has(id)) delete ovConnSeen[id];
+  }
+
+  // Render per-node traffic table
+  const nodeRows = Object.entries(ovNodeTotals)
+    .map(([key, v]) => ({ key, ...v }))
+    .sort((a, b) => (b.down + b.up) - (a.down + a.up));
+  const maxNodeBytes = nodeRows.length > 0 ? Math.max(1, nodeRows[0].down + nodeRows[0].up) : 1;
+  const nodeBox = document.getElementById('ovNodeTrafficBox');
+  if (nodeRows.length === 0) {
+    nodeBox.innerHTML = '<div class="muted">暂无流量记录</div>';
+  } else {
+    nodeBox.innerHTML = nodeRows.slice(0, 10).map(r => {
+      const total = r.down + r.up;
+      const pct = Math.max(2, Math.round((total / maxNodeBytes) * 100));
+      const groupBadge = r.group && r.group !== r.node ? `<span class="badge" style="font-size:11px;">${esc(r.group)}</span>` : '';
+      const encKey = encodeURIComponent(r.key);
+      const encTitle = encodeURIComponent(r.group && r.group !== r.node ? `${r.node} (${r.group})` : r.node);
+      return `<div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,.05);">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <div style="display:flex;align-items:center;gap:6px;min-width:0;">
+            <b style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r.node)}</b>
+            ${groupBadge}
+            ${r.active > 0 ? `<span class="badge ok conn-tag" style="font-size:10px;" onmouseenter="showConnPopover(this,'node','${encKey}','${encTitle}')" onmouseleave="scheduleHideConnPopover()">${r.active} 连接</span>` : ''}
+          </div>
+          <div class="mono" style="white-space:nowrap;">
+            <span style="color:#34d399;">↓${formatHumanBytes(r.down)}</span>
+            <span class="muted"> / </span>
+            <span style="color:#38bdf8;">↑${formatHumanBytes(r.up)}</span>
+          </div>
+        </div>
+        <div class="bar-track"><div class="bar-fill" style="width:${pct}%;"></div></div>
+      </div>`;
+    }).join('');
+  }
+
+  // Render top services / domains
+  const svcRows = Object.values(ovServiceTotals).sort((a, b) => (b.down + b.up) - (a.down + a.up)).slice(0, 10);
+  const svcBox = document.getElementById('ovServiceTrafficBox');
+  if (svcRows.length === 0) {
+    svcBox.innerHTML = '<div class="muted">暂无活跃服务连接</div>';
+  } else {
+    svcBox.innerHTML = '<table><thead><tr><th>目标域名 / 服务</th><th>出口节点</th><th style="text-align:right;">流量 (↓ / ↑)</th></tr></thead><tbody>' +
+      svcRows.map(s => {
+        const encHost = encodeURIComponent(s.host);
+        return `<tr>
+        <td class="mono" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(s.host)} · ${esc(s.rule)}">
+          ${esc(s.host)} ${s.active > 0 ? `<span class="badge ok conn-tag" style="font-size:10px;" onmouseenter="showConnPopover(this,'service','${encHost}','${encHost}')" onmouseleave="scheduleHideConnPopover()">${s.active} 连接</span>` : ''}
+          <div class="muted" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;">${esc(s.rule)}</div>
+        </td>
+        <td style="font-size:12px;"><b>${esc(s.node)}</b></td>
+        <td class="mono" style="text-align:right;white-space:nowrap;">
+          <span style="color:#34d399;">↓${formatHumanBytes(s.down)}</span><br/>
+          <span style="color:#38bdf8;">↑${formatHumanBytes(s.up)}</span>
+        </td>
+      </tr>`;
+      }).join('') + '</tbody></table>';
+  }
+
+  // Keep open hover popover live-updated
+  if (connPopoverState.open) {
+    renderConnPopoverContent();
+  }
+}
+
+async function loadOverviewTelemetry() {
+  if (!lastState || !lastState.running) return;
+  await Promise.all([loadOverviewActiveNodes(), loadOverviewConnections()]);
+}
+
+document.getElementById('btnTestActiveNodes').addEventListener('click', async () => {
+  if (!lastState || !lastState.running) { toast('请先启动核心', true); return; }
+  await loadOverviewActiveNodes();
+  const targets = [...new Set(ovActiveNodesList
+    .filter(x => x.finalNode && x.finalNode !== 'DIRECT' && x.finalNode !== 'REJECT' && !x.isTS)
+    .map(x => x.finalNode))];
+  if (targets.length === 0) { toast('当前没有可测延迟的代理节点', true); return; }
+  const btn = document.getElementById('btnTestActiveNodes');
+  btn.disabled = true;
+  btn.textContent = `测速中 (0/${targets.length})...`;
+  let done = 0;
+  await Promise.all(targets.map(async (name) => {
+    await testSingleNodeDelay(encodeURIComponent(name), null);
+    done++;
+    btn.textContent = `测速中 (${done}/${targets.length})...`;
+  }));
+  btn.disabled = false;
+  btn.textContent = '⚡ 测当前节点延迟';
+  renderOverviewActiveNodes();
+  toast(`当前 ${targets.length} 个出口节点延迟测试完成`);
+});
+
+document.getElementById('btnResetTrafficStats').addEventListener('click', () => {
+  resetOverviewTrafficAccumulator();
+  loadOverviewConnections();
+  toast('已清空本页各节点/服务累计统计');
+});
+
+document.getElementById('btnCloseAllConns').addEventListener('click', async () => {
+  if (!confirm('确认断开当前所有活跃连接？')) return;
+  const { ok } = await api('/clash/connections', { method: 'DELETE' });
+  toast(ok ? '已断开全部活跃连接' : '操作失败', !ok);
+  setTimeout(loadOverviewConnections, 400);
+});
+
+// Initial load & live polling
+loadState().then(() => {
+  loadTailscaleStatus();
+  loadOverviewTelemetry();
+});
+setInterval(() => {
+  loadState();
+  if (currentTab === 'overview' || currentTab === 'tailscale') loadTailscaleStatus();
+  if (currentTab === 'logs') loadLogs();
+}, 4000);
+setInterval(() => {
+  if (currentTab === 'overview' && lastState && lastState.running) {
+    loadOverviewTelemetry();
+  }
+}, 2000);
+</script>
+</body>
+</html>

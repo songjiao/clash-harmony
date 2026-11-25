@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -49,6 +50,8 @@ type bridgeManager struct {
 	logFilePath   string
 	logSub        observable.Subscription[log.Event]
 	logStopDone   chan struct{}
+	tsAPIServer   *http.Server
+	tsAPIAddr     string
 }
 
 var bridge bridgeManager
@@ -296,6 +299,7 @@ func (m *bridgeManager) startEngine(configPath string, tunFd int) error {
 	m.setLastErrorLocked(nil)
 	log.Infoln("[Bridge] Mihomo core started (tun=%v, fd=%d, ctl=%s)",
 		actualTun.Enable, actualTun.FileDescriptor, m.activeCtlAddr)
+	m.startTailscaleAPILocked(defaultTailscaleAPIAddr)
 	eagerStartTailscaleProxies()
 	return nil
 }
@@ -332,6 +336,7 @@ func (m *bridgeManager) stopEngineLocked() {
 	m.activeCtlAddr = ""
 	m.running = false
 
+	m.stopTailscaleAPILocked()
 	executor.Shutdown()
 	listener.ReCreateHTTP(0, tunnel.Tunnel)
 	listener.ReCreateSocks(0, tunnel.Tunnel)

@@ -28,6 +28,7 @@ import (
 	"github.com/metacubex/gvisor/pkg/tcpip/network/ipv6"
 	"github.com/metacubex/gvisor/pkg/tcpip/stack"
 	"github.com/metacubex/gvisor/pkg/tcpip/transport/icmp"
+	"github.com/metacubex/gvisor/pkg/tcpip/transport/raw"
 	"github.com/metacubex/gvisor/pkg/tcpip/transport/tcp"
 	"github.com/metacubex/gvisor/pkg/tcpip/transport/udp"
 	"github.com/metacubex/gvisor/pkg/waiter"
@@ -357,6 +358,7 @@ func Create(logf logger.Logf, tundev *tstun.Wrapper, e wgengine.Engine, mc *magi
 	ipstack := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6},
+		RawFactory:         raw.EndpointFactory{},
 	})
 	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
 	tcpipErr := ipstack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
@@ -955,6 +957,11 @@ func (ns *Impl) handleLocalPackets(p *packet.Parsed, t *tstun.Wrapper, gro *gro.
 
 	gro = ns.linkEP.gro(p, gro)
 	return filter.DropSilently, gro
+}
+
+// IPStack exposes the underlying gVisor stack for raw ICMP ping forwarding.
+func (ns *Impl) IPStack() *stack.Stack {
+	return ns.ipstack
 }
 
 func (ns *Impl) DialContextTCP(ctx context.Context, ipp netip.AddrPort) (*gonet.TCPConn, error) {

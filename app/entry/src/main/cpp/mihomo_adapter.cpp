@@ -35,6 +35,7 @@ using AttachTunFn = int (*)(int);
 using DetachTunFn = int (*)(void);
 using StopFn = int (*)(void);
 using StringFn = const char* (*)(void);
+using ValidateConfigFn = const char* (*)(const char*);
 using FreeCStringFn = void (*)(char*);
 
 const char* REAL_ADAPTER_LIBRARY = "libmihomo_ohos.so";
@@ -59,6 +60,7 @@ StopFn g_realStop = nullptr;
 StringFn g_realVersion = nullptr;
 StringFn g_realLastError = nullptr;
 StringFn g_realAdapterInfo = nullptr;
+ValidateConfigFn g_realValidateConfig = nullptr;
 FreeCStringFn g_realFreeCString = nullptr;
 std::string g_lastError;
 std::string g_realLoadError;
@@ -227,6 +229,7 @@ void ResetRealAdapterLocked()
     g_realVersion = nullptr;
     g_realLastError = nullptr;
     g_realAdapterInfo = nullptr;
+    g_realValidateConfig = nullptr;
     g_realFreeCString = nullptr;
 }
 
@@ -1008,6 +1011,7 @@ bool EnsureRealAdapterLoadedLocked()
     g_realAttachTun = reinterpret_cast<AttachTunFn>(LoadOptionalSymbol("MihomoAttachTun"));
     g_realDetachTun = reinterpret_cast<DetachTunFn>(LoadOptionalSymbol("MihomoDetachTun"));
     g_realAdapterInfo = reinterpret_cast<StringFn>(LoadOptionalSymbol("MihomoAdapterInfo"));
+    g_realValidateConfig = reinterpret_cast<ValidateConfigFn>(LoadOptionalSymbol("MihomoValidateConfig"));
     g_realFreeCString = reinterpret_cast<FreeCStringFn>(LoadOptionalSymbol("MihomoFreeCString"));
     g_realLoadError.clear();
     g_lastError.clear();
@@ -1278,4 +1282,67 @@ bool MihomoSupportsTunAttach(void)
 {
     std::lock_guard<std::mutex> lock(g_adapterMutex);
     return HasRealAdapterLocked() && g_realAttachTun != nullptr && g_realDetachTun != nullptr;
+}
+
+namespace {
+
+struct RealValidateCall {
+    ValidateConfigFn fn = nullptr;
+    FreeCStringFn freeFn = nullptr;
+    std::string yamlText;
+    std::string resultJson;
+};
+
+void* RealValidateWorker(void* opaque)
+{
+    auto* call = reinterpret_cast<RealValidateCall*>(opaque);
+    const char* raw = call->fn(call->yamlText.c_str());
+    if (raw != nullptr) {
+        call->resultJson.assign(raw);
+        if (call->freeFn != nullptr) {
+            call->freeFn(const_cast<char*>(raw));
+        }
+    }
+    return nullptr;
+}
+
+} // namespace
+
+const char* MihomoValidateConfig(const char* yamlText)
+{
+    std::lock_guard<std::mutex> lock(g_adapterMutex);
+    if (yamlText == nullptr || yamlText[0] == '\0') {
+        g_stringScratch = "{\"ok\":false,\"line\":0,\"error\":\"配置内容为空\",\"warnings\":[]}";
+        return g_stringScratch.c_str();
+    }
+    if (!EnsureRealAdapterLoadedLocked() || g_realValidateConfig == nullptr) {
+        g_stringScratch = "{\"ok\":false,\"line\":0,\"error\":\"内核校验符号不可用\",\"warnings\":[]}";
+        return g_stringScratch.c_str();
+    }
+
+    RealValidateCall call;
+    call.fn = g_realValidateConfig;
+    call.freeFn = g_realFreeCString;
+    call.yamlText = yamlText;
+
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0) {
+        g_stringScratch = "{\"ok\":false,\"line\":0,\"error\":\"pthread_attr_init failed\",\"warnings\":[]}";
+        return g_stringScratch.c_str();
+    }
+    constexpr size_t GO_WORKER_STACK_SIZE = 8 * 1024 * 1024;
+    pthread_attr_setstacksize(&attr, GO_WORKER_STACK_SIZE);
+
+    pthread_t thread {};
+    int createResult = pthread_create(&thread, &attr, RealValidateWorker, &call);
+    pthread_attr_destroy(&attr);
+    if (createResult != 0) {
+        g_stringScratch = "{\"ok\":false,\"line\":0,\"error\":\"pthread_create failed\",\"warnings\":[]}";
+        return g_stringScratch.c_str();
+    }
+    pthread_join(thread, nullptr);
+    g_stringScratch = call.resultJson.empty()
+        ? "{\"ok\":false,\"line\":0,\"error\":\"内核未返回校验结果\",\"warnings\":[]}"
+        : call.resultJson;
+    return g_stringScratch.c_str();
 }

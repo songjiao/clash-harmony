@@ -20,6 +20,7 @@ const char* MihomoAdapterMode(void);
 const char* MihomoAdapterKind(void);
 const char* MihomoAdapterInfo(void);
 const char* MihomoAdapterLoadError(void);
+const char* MihomoValidateConfig(const char* yamlText);
 bool MihomoSupportsControllerOnly(void);
 bool MihomoSupportsTunAttach(void);
 

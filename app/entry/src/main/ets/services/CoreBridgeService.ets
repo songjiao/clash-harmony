@@ -1,5 +1,17 @@
 import nativeCore from 'libentry.so';
 
+export interface ConfigValidationResult {
+  ok: boolean;
+  line: number;
+  error: string;
+  warnings: string[];
+  proxyCount: number;
+  groupCount: number;
+  ruleCount: number;
+  hasTailscale: boolean;
+  dnsMode: string;
+}
+
 export interface CoreBridgeState {
   running: boolean;
   tunFd: number;
@@ -207,6 +219,59 @@ export class CoreBridgeService {
       return true;
     } catch (err) {
       return false;
+    }
+  }
+
+  static validateConfig(yamlText: string): ConfigValidationResult {
+    try {
+      const rawJson: string = nativeCore.validateConfig(yamlText);
+      if (!rawJson || rawJson.length === 0) {
+        return {
+          ok: false,
+          line: 0,
+          error: '内核未返回校验结果',
+          warnings: [],
+          proxyCount: 0,
+          groupCount: 0,
+          ruleCount: 0,
+          hasTailscale: false,
+          dnsMode: ''
+        };
+      }
+      const parsed = JSON.parse(rawJson) as Record<string, Object>;
+      const warningsVal: Object | undefined = parsed['warnings'];
+      const warnings: string[] = [];
+      if (Array.isArray(warningsVal)) {
+        const list: Object[] = warningsVal as Object[];
+        for (let i = 0; i < list.length; i++) {
+          if (typeof list[i] === 'string') {
+            warnings.push(list[i] as string);
+          }
+        }
+      }
+      return {
+        ok: parsed['ok'] === true,
+        line: typeof parsed['line'] === 'number' ? parsed['line'] as number : 0,
+        error: typeof parsed['error'] === 'string' ? parsed['error'] as string : '',
+        warnings: warnings,
+        proxyCount: typeof parsed['proxyCount'] === 'number' ? parsed['proxyCount'] as number : 0,
+        groupCount: typeof parsed['groupCount'] === 'number' ? parsed['groupCount'] as number : 0,
+        ruleCount: typeof parsed['ruleCount'] === 'number' ? parsed['ruleCount'] as number : 0,
+        hasTailscale: parsed['hasTailscale'] === true,
+        dnsMode: typeof parsed['dnsMode'] === 'string' ? parsed['dnsMode'] as string : ''
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        line: 0,
+        error: stringifyError(err as Object),
+        warnings: [],
+        proxyCount: 0,
+        groupCount: 0,
+        ruleCount: 0,
+        hasTailscale: false,
+        dnsMode: ''
+      };
     }
   }
 }

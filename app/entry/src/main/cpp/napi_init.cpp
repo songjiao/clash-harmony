@@ -426,6 +426,20 @@ napi_value GetForwarderStats(napi_env env, napi_callback_info info)
     return result;
 }
 
+napi_value ValidateConfig(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    std::string yamlText;
+    if (argc < 1 || !ReadStringArg(env, args[0], yamlText)) {
+        return CreateString(env, "{\"ok\":false,\"line\":0,\"error\":\"无效配置文本参数\",\"warnings\":[]}");
+    }
+    const char* json = MihomoValidateConfig(yamlText.c_str());
+    return CreateString(env, json == nullptr ? "" : std::string(json));
+}
+
 } // namespace
 
 EXTERN_C_START
@@ -440,7 +454,8 @@ static napi_value Init(napi_env env, napi_value exports)
         { "getState", nullptr, GetState, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "protectSocket", nullptr, ProtectSocket, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setProtectCallback", nullptr, SetProtectCallback, nullptr, nullptr, nullptr, napi_default, nullptr },
-        { "getForwarderStats", nullptr, GetForwarderStats, nullptr, nullptr, nullptr, napi_default, nullptr }
+        { "getForwarderStats", nullptr, GetForwarderStats, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "validateConfig", nullptr, ValidateConfig, nullptr, nullptr, nullptr, napi_default, nullptr }
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

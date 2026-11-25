@@ -4,7 +4,9 @@ import { fileIo } from '@kit.CoreFileKit';
 import { ClashProfile, ProfileState } from '../models/Profile';
 import { CoreService } from './CoreService';
 import { ConvertedSubscription, GenericSubscriptionConverterService } from './GenericSubscriptionConverterService';
+import { CustomOverlayConfig, OverlayService } from './OverlayService';
 import { ProfileStore } from './ProfileStore';
+import { TailscaleNativePrefs, TailscalePrefsService } from './TailscalePrefsService';
 
 const RUNTIME_DIR_NAME: string = 'runtime';
 const RUNTIME_CONFIG_NAME: string = 'current.yaml';
@@ -47,7 +49,7 @@ export class RuntimeConfigService {
       await RuntimeConfigService.ensureDir(runtimeDir);
       await RuntimeConfigService.ensureBundledGeoipDb(context, runtimeDir);
       const runtimePath: string = `${runtimeDir}/${RUNTIME_CONFIG_NAME}`;
-      const runtimeText: string = await RuntimeConfigService.normalize(resolved.text);
+      const runtimeText: string = await RuntimeConfigService.buildMergedRuntimeYaml(context, resolved.text);
       await RuntimeConfigService.writeText(runtimePath, runtimeText);
 
       return {
@@ -63,12 +65,25 @@ export class RuntimeConfigService {
     }
   }
 
+  static async buildMergedRuntimeYaml(
+    context: common.Context,
+    rawYaml: string,
+    overrideOverlay?: CustomOverlayConfig
+  ): Promise<string> {
+    const overlay: CustomOverlayConfig = overrideOverlay ? overrideOverlay : await OverlayService.load(context);
+    const withOverlay: string = OverlayService.applyOverlayToYaml(rawYaml, overlay);
+    const tsPrefs: TailscaleNativePrefs = await TailscalePrefsService.load(context);
+    const withTailscale: string = TailscalePrefsService.applyTailscalePrefsToYaml(withOverlay, tsPrefs);
+    return await RuntimeConfigService.normalize(withTailscale);
+  }
+
   static getRuntimeConfigPath(context: common.Context): string {
     return `${context.filesDir}/${RUNTIME_DIR_NAME}/${RUNTIME_CONFIG_NAME}`;
   }
 
   private static async normalize(text: string): Promise<string> {
-    const stripped: string = RuntimeConfigService.removeManagedTopLevelKeys(text);
+    const sanitized: string = RuntimeConfigService.stripLoopbackProxyServerNameserver(text);
+    const stripped: string = RuntimeConfigService.removeManagedTopLevelKeys(sanitized);
     const base: string = RuntimeConfigService.trimTrailingWhitespace(stripped);
     const managed: string[] = [];
     if (!RuntimeConfigService.hasTopLevelKey(base, 'mixed-port')) {
@@ -104,6 +119,95 @@ export class RuntimeConfigService {
       sections.push(defaultDns.join('\n'));
     }
     return `${sections.join('\n\n')}\n`;
+  }
+
+  private static stripLoopbackProxyServerNameserver(text: string): string {
+    const lines: string[] = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+    let dnsStart: number = -1;
+    let dnsEnd: number = lines.length;
+    for (let i = 0; i < lines.length; i++) {
+      const line: string = lines[i];
+      const trimmed: string = line.trim();
+      if (dnsStart < 0) {
+        if (!line.startsWith(' ') && !line.startsWith('\t') && trimmed === 'dns:') {
+          dnsStart = i;
+        }
+        continue;
+      }
+      if (trimmed.length === 0 || trimmed.startsWith('#')) {
+        continue;
+      }
+      if (!line.startsWith(' ') && !line.startsWith('\t') && !line.startsWith('-')) {
+        dnsEnd = i;
+        break;
+      }
+    }
+    if (dnsStart < 0) {
+      return text;
+    }
+
+    const isLoopback = (val: string): boolean => {
+      const low: string = val.toLowerCase();
+      return low.indexOf('127.0.0.1') >= 0 || low.indexOf('localhost') >= 0 || low.indexOf('[::1]') >= 0 || low.indexOf('0.0.0.0') >= 0;
+    };
+    const countSpaces = (line: string): number => {
+      let c: number = 0;
+      while (c < line.length && line.charAt(c) === ' ') {
+        c++;
+      }
+      return c;
+    };
+
+    const dnsSection: string[] = lines.slice(dnsStart, dnsEnd);
+    const newDns: string[] = [];
+    for (let i = 0; i < dnsSection.length; i++) {
+      const line: string = dnsSection[i];
+      if (line.trim() === 'proxy-server-nameserver:') {
+        const headerIndent: number = countSpaces(line);
+        const kept: string[] = [];
+        let j: number = i + 1;
+        while (j < dnsSection.length) {
+          const sub: string = dnsSection[j];
+          const subTrim: string = sub.trim();
+          if (subTrim.length === 0 || subTrim.startsWith('#')) {
+            j++;
+            continue;
+          }
+          if (countSpaces(sub) <= headerIndent && !subTrim.startsWith('- ')) {
+            break;
+          }
+          if (subTrim.startsWith('- ')) {
+            if (!isLoopback(subTrim.substring(2))) {
+              kept.push(sub);
+            }
+            j++;
+            continue;
+          }
+          break;
+        }
+        if (kept.length > 0) {
+          newDns.push(line);
+          for (let k = 0; k < kept.length; k++) {
+            newDns.push(kept[k]);
+          }
+        }
+        i = j - 1;
+        continue;
+      }
+      newDns.push(line);
+    }
+
+    const out: string[] = [];
+    for (let i = 0; i < dnsStart; i++) {
+      out.push(lines[i]);
+    }
+    for (let i = 0; i < newDns.length; i++) {
+      out.push(newDns[i]);
+    }
+    for (let i = dnsEnd; i < lines.length; i++) {
+      out.push(lines[i]);
+    }
+    return out.join('\n');
   }
 
   private static removeManagedTopLevelKeys(text: string): string {

@@ -48,3 +48,4 @@ export const setControllerReady: (ready: boolean, version: string) => NativeCore
 export const protectSocket: (fd: number) => void;
 export const setProtectCallback: (callback: (fd: number) => void) => void;
 export const getForwarderStats: () => ForwarderStats;
+export const validateConfig: (yamlText: string) => string;

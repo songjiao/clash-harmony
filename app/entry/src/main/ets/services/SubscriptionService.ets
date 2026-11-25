@@ -50,6 +50,9 @@ export class SubscriptionService {
     }
 
     const filePath: string = await SubscriptionService.writeProfileYaml(context, profile.uid, converted.text);
+    const trafficLabel: string = payload.userinfoText.length > 0
+      ? payload.userinfoText
+      : SubscriptionService.formatBytes(converted.text.length);
     const nextProfile: ClashProfile = {
       uid: profile.uid,
       type: profile.type,
@@ -58,7 +61,7 @@ export class SubscriptionService {
       filePath: filePath,
       updatedAt: Date.now(),
       nodeCount: converted.nodeCount > 0 ? converted.nodeCount : SubscriptionService.estimateNodeCount(converted.text),
-      traffic: SubscriptionService.formatBytes(converted.text.length)
+      traffic: trafficLabel
     };
     const nextState: ProfileState = await ProfileStore.replace(context, nextProfile);
 
@@ -84,6 +87,9 @@ export class SubscriptionService {
       const response: http.HttpResponse = await request.request(url, {
         method: http.RequestMethod.GET,
         expectDataType: http.HttpDataType.STRING,
+        header: {
+          'User-Agent': 'clash-verge/v2.3.0 mihomo/1.19.34'
+        },
         readTimeout: 15000,
         connectTimeout: 8000,
         usingCache: false
@@ -94,7 +100,8 @@ export class SubscriptionService {
         return {
           ok: false,
           message: `订阅服务器返回 HTTP ${code}`,
-          text: ''
+          text: '',
+          userinfoText: ''
         };
       }
 
@@ -103,24 +110,87 @@ export class SubscriptionService {
         return {
           ok: false,
           message: '订阅内容为空',
-          text: ''
+          text: '',
+          userinfoText: ''
         };
       }
 
+      const userinfoText: string = SubscriptionService.extractUserinfoSummary(response.header);
       return {
         ok: true,
         message: 'ok',
-        text: text
+        text: text,
+        userinfoText: userinfoText
       };
     } catch (err) {
       return {
         ok: false,
         message: '订阅下载失败，请检查网络、URL 或证书配置',
-        text: ''
+        text: '',
+        userinfoText: ''
       };
     } finally {
       request.destroy();
     }
+  }
+
+  private static extractUserinfoSummary(headerObj: Object | undefined): string {
+    if (!headerObj || typeof headerObj !== 'object') {
+      return '';
+    }
+    const headers = headerObj as Record<string, Object>;
+    let raw: string = '';
+    const keys: string[] = Object.keys(headers);
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i].toLowerCase() === 'subscription-userinfo') {
+        const v: Object = headers[keys[i]];
+        if (typeof v === 'string') {
+          raw = v as string;
+        }
+        break;
+      }
+    }
+    if (raw.trim().length === 0) {
+      return '';
+    }
+    let upload: number = 0;
+    let download: number = 0;
+    let total: number = 0;
+    let expire: number = 0;
+    const parts: string[] = raw.split(';');
+    for (let i = 0; i < parts.length; i++) {
+      const kv: string[] = parts[i].split('=');
+      if (kv.length !== 2) {
+        continue;
+      }
+      const k: string = kv[0].trim().toLowerCase();
+      const n: number = Number(kv[1].trim());
+      if (!Number.isFinite(n)) {
+        continue;
+      }
+      if (k === 'upload') {
+        upload = n;
+      } else if (k === 'download') {
+        download = n;
+      } else if (k === 'total') {
+        total = n;
+      } else if (k === 'expire') {
+        expire = n;
+      }
+    }
+    const chunks: string[] = [];
+    if (total > 0) {
+      const usedGb: string = ((upload + download) / (1024 * 1024 * 1024)).toFixed(1);
+      const totalGb: string = (total / (1024 * 1024 * 1024)).toFixed(0);
+      chunks.push(`已用 ${usedGb}/${totalGb}GB`);
+    }
+    if (expire > 0) {
+      const d: Date = new Date(expire * 1000);
+      const m: number = d.getMonth() + 1;
+      const day: number = d.getDate();
+      chunks.push(`到期 ${d.getFullYear()}-${m < 10 ? `0${m}` : `${m}`}-${day < 10 ? `0${day}` : `${day}`}`);
+    }
+    return chunks.join(' · ');
   }
 
   private static async writeProfileYaml(context: common.Context, uid: string, text: string): Promise<string> {
@@ -183,4 +253,5 @@ interface FetchResult {
   ok: boolean;
   message: string;
   text: string;
+  userinfoText: string;
 }

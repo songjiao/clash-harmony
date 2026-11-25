@@ -46,6 +46,15 @@ func MihomoAdapterInfo() *C.char {
 	return C.CString(bridge.adapterInfoJSON())
 }
 
+//export MihomoValidateConfig
+func MihomoValidateConfig(yamlText *C.char) *C.char {
+	text := ""
+	if yamlText != nil {
+		text = C.GoString(yamlText)
+	}
+	return C.CString(validateConfigJSON(text))
+}
+
 //export MihomoFreeCString
 func MihomoFreeCString(s *C.char) {
 	if s != nil {

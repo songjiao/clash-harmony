@@ -24,8 +24,11 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/dns"
 	"github.com/metacubex/mihomo/log"
+	tun "github.com/metacubex/sing-tun"
+	"github.com/metacubex/sing-tun/ping"
 
 	ts "github.com/metacubex/tailscale"
+	"github.com/metacubex/tailscale/client/local"
 	"github.com/metacubex/tailscale/envknob"
 	"github.com/metacubex/tailscale/hostinfo"
 	"github.com/metacubex/tailscale/ipn"
@@ -242,9 +245,41 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 		ExtraRootCAs: ca.GetCertPool(),
 		LookupHook: func(ctx context.Context, host string) ([]netip.Addr, error) {
 			log.Debugln("[Tailscale](%s) LookupHook: start lookup %s", option.Name, host)
+			filterRealIPs := func(in []netip.Addr) []netip.Addr {
+				fakeV4 := netip.MustParsePrefix("198.18.0.0/15")
+				out := make([]netip.Addr, 0, len(in))
+				for _, ip := range in {
+					u := ip.Unmap()
+					if u.Is4() && fakeV4.Contains(u) {
+						continue
+					}
+					out = append(out, u)
+				}
+				return out
+			}
 			ips, err := resolver.LookupIPWithResolver(ctx, host, resolver.ProxyServerHostResolver)
+			if err == nil {
+				ips = filterRealIPs(ips)
+			}
+			if (err != nil || len(ips) == 0) && resolver.DefaultResolver != nil && resolver.DefaultResolver != resolver.ProxyServerHostResolver {
+				if fb, fbErr := resolver.LookupIPWithResolver(ctx, host, resolver.DefaultResolver); fbErr == nil {
+					if realFB := filterRealIPs(fb); len(realFB) > 0 {
+						ips, err = realFB, nil
+					}
+				}
+			}
+			if (err != nil || len(ips) == 0) && resolver.SystemResolver != nil {
+				if sysIPs, sysErr := resolver.LookupIPWithResolver(ctx, host, resolver.SystemResolver); sysErr == nil {
+					if realSys := filterRealIPs(sysIPs); len(realSys) > 0 {
+						ips, err = realSys, nil
+					}
+				}
+			}
 			log.Debugln("[Tailscale](%s) LookupHook: finish lookup %s, ips: %v, err: %v", option.Name, host, ips, err)
-			if err != nil {
+			if err != nil || len(ips) == 0 {
+				if err == nil {
+					err = fmt.Errorf("resolved only fake-ip for %s", host)
+				}
 				outbound.recordLog(fmt.Sprintf("LookupHook failed (%s): %v", host, err), false)
 			}
 			return ips, err
@@ -379,6 +414,65 @@ func (t *Tailscale) start() error {
 // Start eagerly initializes the underlying tsnet.Server without waiting for the first dial.
 func (t *Tailscale) Start() error {
 	return t.start()
+}
+
+// LocalClient returns the tsnet LocalClient once the Tailscale server has started.
+func (t *Tailscale) LocalClient() (*local.Client, error) {
+	if t.server == nil || !t.serverStarted {
+		return nil, errors.New("tailscale server not started")
+	}
+	return t.server.LocalClient()
+}
+
+// Option returns a copy of the configured Tailscale outbound options.
+func (t *Tailscale) Option() TailscaleOption {
+	return t.option
+}
+
+// ConnectICMP forwards real ICMP Echo packets through the Tailscale tsnet gVisor stack
+// so `ping` to Tailscale peers and advertised subnet routers (e.g. 192.168.1.x) returns real RTT.
+func (t *Tailscale) ConnectICMP(ctx context.Context, source, destination netip.Addr, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
+	if err := t.ensureStarted(ctx); err != nil {
+		return nil, err
+	}
+	ns, err := t.server.Netstack(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if ns == nil || ns.IPStack() == nil {
+		return nil, errors.New("tailscale netstack unavailable")
+	}
+
+	var bind4, bind6 netip.Addr
+	for _, rawIP := range t.StatusSnapshot().TailscaleIPs {
+		addr, pErr := netip.ParseAddr(strings.TrimSpace(rawIP))
+		if pErr != nil || !addr.IsValid() {
+			continue
+		}
+		if addr.Is4() && !bind4.IsValid() {
+			bind4 = addr
+		} else if addr.Is6() && !bind6.IsValid() {
+			bind6 = addr
+		}
+	}
+	if (!destination.Is6() && !bind4.IsValid()) || (destination.Is6() && !bind6.IsValid()) {
+		if lc, lcErr := t.server.LocalClient(); lcErr == nil {
+			qCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			st, sErr := lc.StatusWithoutPeers(qCtx)
+			cancel()
+			if sErr == nil && st != nil {
+				for _, addr := range st.TailscaleIPs {
+					if addr.Is4() && !bind4.IsValid() {
+						bind4 = addr
+					} else if addr.Is6() && !bind6.IsValid() {
+						bind6 = addr
+					}
+				}
+			}
+		}
+	}
+
+	return ping.ConnectGVisor(ctx, log.SingLogger, source, destination, routeContext, ns.IPStack(), bind4, bind6, timeout)
 }
 
 func (t *Tailscale) ensureStarted(ctx context.Context) error {
@@ -730,6 +824,12 @@ func (t tailscaleDNSTransport) ExchangeContext(ctx context.Context, msg *D.Msg) 
 		return nil, err
 	}
 	q := msg.Question[0]
+	if q.Qtype == D.TypeHTTPS || q.Qtype == D.TypeSVCB {
+		resp := new(D.Msg)
+		resp.SetReply(msg)
+		resp.RecursionAvailable = true
+		return resp, nil
+	}
 	qtypeName, ok := D.TypeToString[q.Qtype]
 	if !ok {
 		return nil, fmt.Errorf("unsupported query type: %d", q.Qtype)

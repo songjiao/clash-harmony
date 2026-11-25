@@ -4,7 +4,7 @@ import { fileIo } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { ClashConfigParserService, ParsedConfigSummary, ParsedProxyNode } from '../services/ClashConfigParserService';
 import { ClipboardImportResult, ClipboardImportService } from '../services/ClipboardImportService';
-import { CoreBridgeService, CoreBridgeState } from '../services/CoreBridgeService';
+import { CoreBridgeService, CoreBridgeState, ConfigValidationResult } from '../services/CoreBridgeService';
 import { CoreService, CoreSummary } from '../services/CoreService';
 import { ClashProfile, createEmptyProfileState, createRemoteProfile, formatProfileUpdatedAt, ProfileState } from '../models/Profile';
 import {
@@ -15,9 +15,50 @@ import {
   ProxyGroupInfo
 } from '../services/MihomoControllerService';
 import { FileImportResult, LocalFileImportService } from '../services/LocalFileImportService';
+import {
+  AiProviderPreset,
+  BackupImportResult,
+  createDefaultOverlayConfig,
+  CustomOverlayConfig,
+  DEFAULT_AI_GROUP_NAME,
+  getAllAiProviderPresets,
+  OverlayService,
+  ParsedCustomProxies
+} from '../services/OverlayService';
 import { ProfileStore } from '../services/ProfileStore';
+import {
+  ProfileVersionEntry,
+  ProfileVersionManifest,
+  ProfileVersionService,
+  VersionCommitResult
+} from '../services/ProfileVersionService';
 import { RuntimeConfigResult, RuntimeConfigService } from '../services/RuntimeConfigService';
 import { SubscriptionService, SubscriptionUpdateResult } from '../services/SubscriptionService';
+import {
+  createEmptyTailscaleControlStatus,
+  LiveRuleTestResult,
+  TailscaleActionResult,
+  TailscaleAdvertisedRouteItem,
+  TailscaleControlService,
+  TailscaleControlStatus,
+  TailscaleDnsQueryResult,
+  TailscalePeerItem,
+  TailscalePingResult,
+  TailscaleSplitDnsItem
+} from '../services/TailscaleControlService';
+import {
+  createDefaultTailscalePrefs,
+  TailscaleNativePrefs,
+  TailscalePrefsService
+} from '../services/TailscalePrefsService';
+import {
+  FlowBucket,
+  ParsedRuleItem,
+  RouteSimulationResult,
+  TrafficAnalysis,
+  TrafficRuleAnalyzerService
+} from '../services/TrafficRuleAnalyzerService';
+import { DiffLine, DiffSummary, YamlDiffService } from '../services/YamlDiffService';
 import {
   ConnectionInfo as PollerConnectionInfo,
   TrafficPollerService,
@@ -101,13 +142,14 @@ interface TailscaleRuntimeStatus {
 const NAV_ITEMS: NavItem[] = [
   { key: 'home', label: '首页', shortLabel: 'H' },
   { key: 'proxies', label: '代理', shortLabel: 'P' },
+  { key: 'tailscale', label: 'Tailscale', shortLabel: 'T' },
   { key: 'profiles', label: '配置', shortLabel: 'C' },
   { key: 'diagnostics', label: '诊断', shortLabel: 'D' }
 ];
 const LOG_DOMAIN: number = 0x0001;
 const LOG_TAG: string = 'ClashHarmonyIndex';
-const APP_VERSION_NAME: string = 'v2.1.1';
-const APP_BUILD_UPDATED_AT: string = '2026-11-24 17:30';
+const APP_VERSION_NAME: string = 'v2.3.1';
+const APP_BUILD_UPDATED_AT: string = '2026-11-25 21:40';
 const DELAY_TEST_TIMEOUT_MS: number = 4500;
 const DELAY_TEST_URLS: string[] = [
   'https://cp.cloudflare.com/generate_204',
@@ -194,6 +236,73 @@ struct Index {
   @State private tailscaleError: string = '';
   @State private tailscaleHealth: string[] = [];
   @State private tailscaleRecentLogs: string[] = [];
+  // Phase 1: Config version management, editor, kernel validator, diff
+  @State private profileSubTab: string = 'list';
+  @State private editingProfileUid: string = '';
+  @State private editingProfileName: string = '';
+  @State private editorBaseText: string = '';
+  @State private editorDraftText: string = '';
+  @State private editorCommitNote: string = '';
+  @State private editorValidationChecked: boolean = false;
+  @State private editorValidationOk: boolean = false;
+  @State private editorValidationLine: number = 0;
+  @State private editorValidationMessage: string = '';
+  @State private editorValidationWarnings: string[] = [];
+  @State private editorValidationStats: string = '';
+  @State private showDiffPanel: boolean = false;
+  @State private diffContextOnly: boolean = true;
+  @State private diffTitle: string = '';
+  @State private diffSummaryText: string = '';
+  @State private diffLines: DiffLine[] = [];
+  @State private versionHistory: ProfileVersionEntry[] = [];
+  @State private activeVersionNumber: number = 0;
+  @State private showVersionHistory: boolean = false;
+  @State private isSavingDraft: boolean = false;
+  @State private editorSaveBanner: string = '';
+  @State private editorSaveBannerOk: boolean = true;
+  // Phase 4: Self-hosted Overlay, Fail-Closed AI, Rule Test, Batch Ping & Cross-Platform Backup
+  @State private overlayConfig: CustomOverlayConfig = createDefaultOverlayConfig();
+  @State private overlayGroupNameDraft: string = DEFAULT_AI_GROUP_NAME;
+  @State private overlayProxiesDraft: string = '';
+  @State private overlayCustomRulesDraft: string = '';
+  @State private overlayAiDomainsDraft: string = '';
+  @State private overlayAiKeywordsDraft: string = '';
+  @State private overlayDirectDomainsDraft: string = '';
+  @State private overlayBanner: string = '';
+  @State private overlayBannerOk: boolean = true;
+  @State private isSavingOverlay: boolean = false;
+  @State private showOverlayAdvanced: boolean = false;
+  @State private isBatchPingingPeers: boolean = false;
+  @State private batchPingProgress: string = '';
+  @State private proxyRuleTestInput: string = 'claude.ai';
+  @State private proxyRuleTestResult: string = '';
+  @State private proxyRuleTestDetail: string = '';
+  @State private proxyRuleTestOk: boolean = true;
+  @State private proxyRuleTestIsReject: boolean = false;
+  // Phase 2: Embedded native Tailscale management
+  @State private tsPrefs: TailscaleNativePrefs = createDefaultTailscalePrefs();
+  @State private tsControl: TailscaleControlStatus = createEmptyTailscaleControlStatus();
+  @State private tsHostnameDraft: string = 'harmony-phone';
+  @State private tsControlUrlDraft: string = '';
+  @State private tsAuthKeyDraft: string = '';
+  @State private tsBusyMessage: string = '';
+  @State private tsDnsTestQuery: string = '';
+  @State private tsDnsTestResult: string = '';
+  @State private tsSplitDnsNeedReload: boolean = false;
+  @State private tsPingRefreshTick: number = 0;
+  private tsPeerPingResults: Record<string, string> = {};
+  // Phase 3: Visual traffic routing & simulator
+  @State private trafficAnalysis: TrafficAnalysis = TrafficRuleAnalyzerService.analyze('');
+  @State private simQuery: string = '';
+  @State private simResult: RouteSimulationResult = TrafficRuleAnalyzerService.simulateRoute(
+    TrafficRuleAnalyzerService.analyze(''), '', 'rule'
+  );
+  @State private ruleSearchText: string = '';
+  @State private showAddRulePanel: boolean = false;
+  @State private newRuleType: string = 'DOMAIN-SUFFIX';
+  @State private newRulePayload: string = '';
+  @State private newRuleTarget: string = 'Tailscale';
+  @State private newRulePrepend: boolean = true;
   @State private liveConnected: boolean = false;
   @State private liveUptime: string = '未连接';
   @State private liveDownloadSpeed: string = '0 KB/s';
@@ -238,8 +347,13 @@ struct Index {
     const context = getContext(this) as common.Context;
     const state: ProfileState = await ProfileStore.load(context);
     this.runtimeConfigPath = RuntimeConfigService.getRuntimeConfigPath(context);
+    await this.loadTailscalePrefs();
+    await this.loadOverlayConfig();
     this.applyProfileState(state);
     await this.refreshProxyNodes(state);
+    if (state.currentUid.length > 0) {
+      await this.loadProfileWorkspaceData(state.currentUid);
+    }
     await this.resumeRuntimeIfControllerAvailable();
     hilog.info(LOG_DOMAIN, LOG_TAG, 'Profiles loaded: %{public}d items, currentUid=%{public}s',
       state.items.length, state.currentUid);
@@ -453,6 +567,9 @@ struct Index {
       }
     }
 
+    if (runtime.ok) {
+      this.tsSplitDnsNeedReload = false;
+    }
     return runtime;
   }
 
@@ -1582,6 +1699,7 @@ struct Index {
       } else if (status.authUrl.length > 0) {
         this.tailscaleAuthUrl = status.authUrl;
       }
+      await this.refreshTailscaleControl();
     } catch (_err) {
     }
   }
@@ -1863,6 +1981,1121 @@ struct Index {
     return `${(bytesPerSecond / 1024 / 1024).toFixed(1)} MB/s`;
   }
 
+  // ============== Phase 1: Profile Version Management, Editor & Diff ==============
+  private findProfileByUid(uid: string): ClashProfile | undefined {
+    for (let i = 0; i < this.profileState.items.length; i++) {
+      if (this.profileState.items[i].uid === uid) {
+        return this.profileState.items[i];
+      }
+    }
+    return undefined;
+  }
+
+  private async loadProfileWorkspaceData(uid: string): Promise<void> {
+    const profile: ClashProfile | undefined = this.findProfileByUid(uid);
+    if (!profile) {
+      return;
+    }
+    const context = getContext(this) as common.Context;
+    const manifest: ProfileVersionManifest = await ProfileVersionService.loadManifest(context, profile);
+    const text: string = await ProfileVersionService.readCurrentText(context, profile);
+    this.editingProfileUid = profile.uid;
+    this.editingProfileName = profile.name;
+    this.versionHistory = ProfileVersionService.reversedVersions(manifest);
+    this.activeVersionNumber = manifest.activeVersion;
+    this.editorBaseText = text;
+    this.editorDraftText = text;
+    this.editorCommitNote = '';
+    this.editorValidationChecked = false;
+    this.editorValidationOk = false;
+    this.editorValidationLine = 0;
+    this.editorValidationMessage = '';
+    this.editorValidationWarnings = [];
+    this.editorValidationStats = '';
+    this.editorSaveBanner = '';
+    this.editorSaveBannerOk = true;
+    this.showDiffPanel = false;
+    this.diffLines = [];
+    this.trafficAnalysis = TrafficRuleAnalyzerService.analyze(text);
+    if (this.simQuery.trim().length > 0) {
+      this.simResult = TrafficRuleAnalyzerService.simulateRoute(this.trafficAnalysis, this.simQuery, this.proxyMode);
+    }
+  }
+
+  private async openProfileWorkspace(uid: string, subTab: string, expandHistory: boolean = false): Promise<void> {
+    await this.loadProfileWorkspaceData(uid);
+    if (expandHistory) {
+      this.showVersionHistory = true;
+    }
+    this.profileSubTab = subTab;
+    this.currentTab = 'profiles';
+  }
+
+  private async runKernelValidateDraft(): Promise<ConfigValidationResult> {
+    const context = getContext(this) as common.Context;
+    const mergedText: string = await RuntimeConfigService.buildMergedRuntimeYaml(context, this.editorDraftText);
+    const res: ConfigValidationResult = CoreBridgeService.validateConfig(mergedText);
+    this.editorValidationChecked = true;
+    this.editorValidationOk = res.ok;
+    this.editorValidationLine = res.line;
+    this.editorValidationWarnings = res.warnings;
+    if (res.ok) {
+      this.editorValidationMessage = 'Mihomo 融合内核语法校验通过';
+      this.editorValidationStats = `${res.proxyCount} 节点 · ${res.groupCount} 策略组 · ${res.ruleCount} 规则 · DNS ${res.dnsMode}${res.hasTailscale ? ' · 含 Tailscale' : ''}`;
+    } else {
+      this.editorValidationMessage = res.line > 0 ? `第 ${res.line} 行错误：${res.error}` : res.error;
+      this.editorValidationStats = '';
+    }
+    return res;
+  }
+
+  private previewDraftDiff(): void {
+    const summary: DiffSummary = YamlDiffService.computeDiff(this.editorBaseText, this.editorDraftText);
+    this.diffTitle = `当前草稿 vs 激活版本 v${this.activeVersionNumber}`;
+    this.diffSummaryText = summary.changed
+      ? `+${summary.added} 行新增 / -${summary.removed} 行删除`
+      : '与当前激活版本完全一致（无变更）';
+    this.diffLines = summary.lines;
+    this.showDiffPanel = true;
+  }
+
+  private async compareHistoryVersion(version: number): Promise<void> {
+    const profile: ClashProfile | undefined = this.findProfileByUid(this.editingProfileUid);
+    if (!profile) {
+      return;
+    }
+    const context = getContext(this) as common.Context;
+    const manifest: ProfileVersionManifest = await ProfileVersionService.loadManifest(context, profile);
+    const entry: ProfileVersionEntry | undefined = ProfileVersionService.findVersion(manifest, version);
+    if (!entry) {
+      return;
+    }
+    const oldText: string = await ProfileVersionService.readVersionText(entry.filePath);
+    const summary: DiffSummary = YamlDiffService.computeDiff(oldText, this.editorBaseText);
+    this.diffTitle = `历史版本 v${version} -> 当前版本 v${this.activeVersionNumber}`;
+    this.diffSummaryText = summary.changed
+      ? `+${summary.added} 行新增 / -${summary.removed} 行删除`
+      : '两个版本内容完全一致';
+    this.diffLines = summary.lines;
+    this.showDiffPanel = true;
+  }
+
+  private visibleDiffLines(): DiffLine[] {
+    if (!this.diffContextOnly) {
+      return this.diffLines;
+    }
+    return YamlDiffService.filterChangedContext(this.diffLines, 3);
+  }
+
+  private async saveDraftAsNewVersion(): Promise<void> {
+    if (this.isSavingDraft) {
+      return;
+    }
+    const profile: ClashProfile | undefined = this.findProfileByUid(this.editingProfileUid);
+    if (!profile) {
+      this.editorSaveBannerOk = false;
+      this.editorSaveBanner = '请先在配置列表中选择一个配置';
+      this.statusMessage = this.editorSaveBanner;
+      return;
+    }
+    if (this.editorDraftText === this.editorBaseText) {
+      this.editorSaveBannerOk = false;
+      this.editorSaveBanner = `内容与当前版本 v${this.activeVersionNumber} 完全一致，无需重复保存`;
+      this.statusMessage = this.editorSaveBanner;
+      return;
+    }
+
+    this.isSavingDraft = true;
+    this.editorSaveBannerOk = true;
+    this.editorSaveBanner = '正在执行融合校验并保存...';
+    try {
+      const validation: ConfigValidationResult = await this.runKernelValidateDraft();
+      if (!validation.ok) {
+        this.editorSaveBannerOk = false;
+        this.editorSaveBanner = `校验未通过，已阻止保存：${this.editorValidationMessage}`;
+        this.statusMessage = this.editorSaveBanner;
+        this.recordLog('warn', this.statusMessage);
+        return;
+      }
+      const context = getContext(this) as common.Context;
+      const note: string = this.editorCommitNote.trim().length > 0 ? this.editorCommitNote.trim() : '在线编辑保存';
+      const commit: VersionCommitResult = await ProfileVersionService.commitNewVersion(
+        context,
+        profile,
+        this.editorDraftText,
+        'edit',
+        note
+      );
+      if (!commit.ok) {
+        this.editorSaveBannerOk = false;
+        this.editorSaveBanner = commit.message;
+        this.statusMessage = commit.message;
+        return;
+      }
+      this.applyProfileState(commit.state);
+      this.versionHistory = ProfileVersionService.reversedVersions(commit.manifest);
+      this.activeVersionNumber = commit.version;
+      this.editorBaseText = this.editorDraftText;
+      this.editorCommitNote = '';
+      this.showDiffPanel = false;
+      this.trafficAnalysis = TrafficRuleAnalyzerService.analyze(this.editorDraftText);
+      await this.refreshProxyNodes(commit.state);
+      this.editorSaveBannerOk = true;
+      this.editorSaveBanner = `已保存为 v${commit.version}（融合校验通过，重连 VPN 生效）`;
+      this.statusMessage = `${commit.message}（若已连接 VPN，重新连接后生效）`;
+      this.recordLog('info', this.statusMessage);
+    } finally {
+      this.isSavingDraft = false;
+    }
+  }
+
+  private async rollbackToHistoryVersion(version: number): Promise<void> {
+    const profile: ClashProfile | undefined = this.findProfileByUid(this.editingProfileUid);
+    if (!profile) {
+      return;
+    }
+    const context = getContext(this) as common.Context;
+    const result: VersionCommitResult = await ProfileVersionService.rollbackToVersion(context, profile, version);
+    if (!result.ok) {
+      this.statusMessage = result.message;
+      return;
+    }
+    this.applyProfileState(result.state);
+    await this.loadProfileWorkspaceData(profile.uid);
+    await this.refreshProxyNodes(result.state);
+    this.statusMessage = `已回滚至 v${version} 并生成新版本 v${result.version}`;
+    this.recordLog('info', this.statusMessage);
+  }
+
+  private async loadVersionIntoEditor(version: number): Promise<void> {
+    const profile: ClashProfile | undefined = this.findProfileByUid(this.editingProfileUid);
+    if (!profile) {
+      return;
+    }
+    const context = getContext(this) as common.Context;
+    const manifest: ProfileVersionManifest = await ProfileVersionService.loadManifest(context, profile);
+    const entry: ProfileVersionEntry | undefined = ProfileVersionService.findVersion(manifest, version);
+    if (!entry) {
+      return;
+    }
+    this.editorDraftText = await ProfileVersionService.readVersionText(entry.filePath);
+    this.editorCommitNote = `基于 v${version} 修改`;
+    this.profileSubTab = 'editor';
+    this.statusMessage = `已载入历史版本 v${version} 到编辑器`;
+  }
+
+  // ============== Phase 2: Embedded Native Tailscale Management ==============
+  private async loadTailscalePrefs(): Promise<void> {
+    const context = getContext(this) as common.Context;
+    const prefs: TailscaleNativePrefs = await TailscalePrefsService.load(context);
+    this.tsPrefs = prefs;
+    this.tsHostnameDraft = prefs.hostname;
+    this.tsControlUrlDraft = prefs.controlUrl;
+    this.tsAuthKeyDraft = prefs.authKey;
+  }
+
+  private async refreshTailscaleControl(): Promise<void> {
+    const st: TailscaleControlStatus = await TailscaleControlService.getStatus();
+    if (!st.reachable) {
+      return;
+    }
+    this.tsControl = st;
+    if (st.backendState.length > 0) {
+      this.tailscaleState = st.backendState;
+    }
+    if (st.hostname.length > 0) {
+      this.tailscaleHostname = st.hostname;
+    }
+    if (st.tailscaleIPs.length > 0) {
+      this.tailscaleIps = st.tailscaleIPs.join(', ');
+    }
+    if (st.backendState === 'Running') {
+      this.tailscaleAuthUrl = '';
+    } else if (st.authUrl.length > 0) {
+      this.tailscaleAuthUrl = st.authUrl;
+    }
+    if (st.lastError.length > 0) {
+      this.tailscaleError = st.lastError;
+    }
+    const discoveredSplitDomains: string[] = [];
+    for (let i = 0; i < st.splitDns.length; i++) {
+      const d: string = st.splitDns[i].domain.trim().toLowerCase();
+      if (d.length > 0 && discoveredSplitDomains.indexOf(d) < 0) {
+        discoveredSplitDomains.push(d);
+      }
+    }
+    const suffixChanged: boolean = st.magicDnsSuffix.length > 0 && st.magicDnsSuffix !== this.tsPrefs.tailnetSuffix;
+    const splitChanged: boolean = discoveredSplitDomains.length > 0 &&
+      !this.sameStringList(discoveredSplitDomains, this.tsPrefs.splitDnsDomains);
+    if (suffixChanged || splitChanged) {
+      const next: TailscaleNativePrefs = this.cloneTailscalePrefs(this.tsPrefs);
+      if (suffixChanged) {
+        next.tailnetSuffix = st.magicDnsSuffix;
+      }
+      if (splitChanged) {
+        next.splitDnsDomains = discoveredSplitDomains;
+        if (this.tsPrefs.autoSyncSplitDns && this.liveConnected) {
+          this.tsSplitDnsNeedReload = true;
+          this.tsBusyMessage = `已自动发现 SplitDNS 域名（${discoveredSplitDomains.join(', ')}），重连 VPN 后自动生效`;
+        }
+      }
+      this.tsPrefs = next;
+      const context = getContext(this) as common.Context;
+      await TailscalePrefsService.save(context, next);
+    }
+  }
+
+  private sameStringList(a: string[], b: string[]): boolean {
+    if (a.length !== b.length) {
+      return false;
+    }
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private cloneTailscalePrefs(src: TailscaleNativePrefs): TailscaleNativePrefs {
+    const splitCopy: string[] = [];
+    for (let i = 0; i < src.splitDnsDomains.length; i++) {
+      splitCopy.push(src.splitDnsDomains[i]);
+    }
+    return {
+      managedByApp: src.managedByApp,
+      enabled: src.enabled,
+      proxyName: src.proxyName,
+      hostname: src.hostname,
+      controlUrl: src.controlUrl,
+      acceptRoutes: src.acceptRoutes,
+      exitNode: src.exitNode,
+      exitNodeAllowLan: src.exitNodeAllowLan,
+      authKey: src.authKey,
+      autoInjectMagicDns: src.autoInjectMagicDns,
+      tailnetSuffix: src.tailnetSuffix,
+      autoSyncSplitDns: src.autoSyncSplitDns,
+      splitDnsDomains: splitCopy
+    };
+  }
+
+  private async saveTailscalePrefsAndApply(next: TailscaleNativePrefs, applyLive: boolean): Promise<void> {
+    const context = getContext(this) as common.Context;
+    this.tsPrefs = next;
+    await TailscalePrefsService.save(context, next);
+    if (applyLive && this.tsControl.reachable && this.tsControl.available) {
+      this.tsBusyMessage = '正在向运行中的 Tailscale 内核热更新偏好...';
+      const res: TailscaleActionResult = await TailscaleControlService.updatePrefs({
+        hostname: next.hostname,
+        acceptRoutes: next.acceptRoutes,
+        exitNode: next.exitNode,
+        exitNodeAllowLan: next.exitNodeAllowLan,
+        controlUrl: next.controlUrl
+      });
+      if (res.ok && res.status) {
+        this.tsControl = res.status;
+        this.tsBusyMessage = '已热生效（无需重启 VPN）';
+        this.recordLog('info', 'Tailscale 偏好已热更新');
+      } else {
+        this.tsBusyMessage = `已保存本地配置（热更新提示：${res.error}）`;
+        this.recordLog('warn', this.tsBusyMessage);
+      }
+    } else {
+      this.tsBusyMessage = 'Tailscale 原生配置已保存，下次连接自动注入';
+      this.recordLog('info', this.tsBusyMessage);
+    }
+  }
+
+  private async toggleTsManagedByApp(): Promise<void> {
+    const next: TailscaleNativePrefs = this.cloneTailscalePrefs(this.tsPrefs);
+    next.managedByApp = !next.managedByApp;
+    await this.saveTailscalePrefsAndApply(next, false);
+  }
+
+  private async toggleTsEnabled(): Promise<void> {
+    const next: TailscaleNativePrefs = this.cloneTailscalePrefs(this.tsPrefs);
+    next.enabled = !next.enabled;
+    await this.saveTailscalePrefsAndApply(next, false);
+  }
+
+  private async toggleTsAcceptRoutes(): Promise<void> {
+    const next: TailscaleNativePrefs = this.cloneTailscalePrefs(this.tsPrefs);
+    next.acceptRoutes = !next.acceptRoutes;
+    await this.saveTailscalePrefsAndApply(next, true);
+  }
+
+  private async toggleTsExitNodeAllowLan(): Promise<void> {
+    const next: TailscaleNativePrefs = this.cloneTailscalePrefs(this.tsPrefs);
+    next.exitNodeAllowLan = !next.exitNodeAllowLan;
+    await this.saveTailscalePrefsAndApply(next, true);
+  }
+
+  private async toggleTsAutoInjectDns(): Promise<void> {
+    const next: TailscaleNativePrefs = this.cloneTailscalePrefs(this.tsPrefs);
+    next.autoInjectMagicDns = !next.autoInjectMagicDns;
+    await this.saveTailscalePrefsAndApply(next, false);
+  }
+
+  private async toggleTsAutoSyncSplitDns(): Promise<void> {
+    const next: TailscaleNativePrefs = this.cloneTailscalePrefs(this.tsPrefs);
+    next.autoSyncSplitDns = !next.autoSyncSplitDns;
+    await this.saveTailscalePrefsAndApply(next, false);
+  }
+
+  private async saveTsTextSettings(): Promise<void> {
+    const next: TailscaleNativePrefs = this.cloneTailscalePrefs(this.tsPrefs);
+    next.hostname = this.tsHostnameDraft.trim().length > 0 ? this.tsHostnameDraft.trim() : 'harmony-phone';
+    next.controlUrl = this.tsControlUrlDraft.trim();
+    next.authKey = this.tsAuthKeyDraft.trim();
+    await this.saveTailscalePrefsAndApply(next, true);
+  }
+
+  private async selectTsExitNode(ipOrEmpty: string): Promise<void> {
+    const next: TailscaleNativePrefs = this.cloneTailscalePrefs(this.tsPrefs);
+    next.exitNode = ipOrEmpty;
+    await this.saveTailscalePrefsAndApply(next, true);
+  }
+
+  private async routeProxyViaTailscaleExitNode(): Promise<void> {
+    if (!this.controllerStatus.available) {
+      this.tsBusyMessage = '请先启动 VPN 后再切换代理出口';
+      return;
+    }
+    const targetName: string = this.tsPrefs.proxyName.length > 0 ? this.tsPrefs.proxyName : 'Tailscale';
+    await MihomoControllerService.setMode('global');
+    const ok: boolean = await MihomoControllerService.selectProxy('GLOBAL', targetName);
+    if (ok) {
+      this.proxyMode = 'global';
+      this.tsBusyMessage = `已将全局流量切换至 ${targetName}（Exit Node 生效）`;
+      this.recordLog('info', this.tsBusyMessage);
+    } else {
+      this.tsBusyMessage = `切换 GLOBAL -> ${targetName} 失败，请检查配置中是否包含 ${targetName}`;
+    }
+  }
+
+  private async triggerTailscaleLogin(): Promise<void> {
+    if (!this.tsControl.reachable) {
+      this.tsBusyMessage = '请先在首页连接 VPN 启动 Tailscale 核心';
+      return;
+    }
+    this.tsBusyMessage = '正在请求交互式登录链接...';
+    const res: TailscaleActionResult = await TailscaleControlService.startLogin();
+    if (res.ok) {
+      if (res.status) {
+        this.tsControl = res.status;
+      }
+      await this.refreshTailscaleStatus();
+      this.tsBusyMessage = '已触发登录，请复制上方登录链接在浏览器授权';
+    } else {
+      this.tsBusyMessage = `触发登录失败：${res.error}`;
+    }
+  }
+
+  private async triggerTailscaleLogout(): Promise<void> {
+    if (!this.tsControl.reachable) {
+      this.tsBusyMessage = '请先连接 VPN 后再执行登出';
+      return;
+    }
+    this.tsBusyMessage = '正在登出 Tailscale 节点...';
+    const res: TailscaleActionResult = await TailscaleControlService.logout();
+    if (res.ok) {
+      if (res.status) {
+        this.tsControl = res.status;
+      }
+      await this.refreshTailscaleStatus();
+      this.tsBusyMessage = '已登出，可点击「重新登录」切换账号';
+      this.recordLog('info', 'Tailscale 节点已登出');
+    } else {
+      this.tsBusyMessage = `登出失败：${res.error}`;
+    }
+  }
+
+  private async pingTailscalePeer(peer: TailscalePeerItem): Promise<void> {
+    if (peer.tailscaleIPs.length === 0) {
+      return;
+    }
+    const ip: string = peer.tailscaleIPs[0];
+    this.tsPeerPingResults[peer.id] = 'Ping 中...';
+    this.tsPingRefreshTick = this.tsPingRefreshTick + 1;
+    const res: TailscalePingResult = await TailscaleControlService.pingPeer(ip);
+    if (res.ok) {
+      const ms: string = `${Math.round(res.latencyMs)} ms`;
+      this.tsPeerPingResults[peer.id] = res.direct
+        ? `直连 ${ms}`
+        : `DERP(${res.derpRegionCode.length > 0 ? res.derpRegionCode : 'relay'}) ${ms}`;
+    } else {
+      this.tsPeerPingResults[peer.id] = `失败: ${res.error}`;
+    }
+    this.tsPingRefreshTick = this.tsPingRefreshTick + 1;
+  }
+
+  private getPeerPingText(peerId: string): string {
+    const val: string | undefined = this.tsPeerPingResults[peerId];
+    return val ? val : '';
+  }
+
+  private async pingAllOnlineTailscalePeers(): Promise<void> {
+    if (this.isBatchPingingPeers) {
+      return;
+    }
+    const targets: TailscalePeerItem[] = [];
+    for (let i = 0; i < this.tsControl.peers.length; i++) {
+      const p: TailscalePeerItem = this.tsControl.peers[i];
+      if (p.online && p.tailscaleIPs.length > 0) {
+        targets.push(p);
+      }
+    }
+    if (targets.length === 0) {
+      this.batchPingProgress = '暂无在线 Tailscale 设备可测速';
+      this.tsBusyMessage = this.batchPingProgress;
+      return;
+    }
+    this.isBatchPingingPeers = true;
+    this.batchPingProgress = `批量 Ping 中 0/${targets.length}...`;
+    let done: number = 0;
+    let reachable: number = 0;
+    try {
+      const tasks: Promise<void>[] = [];
+      for (let i = 0; i < targets.length; i++) {
+        const peer: TailscalePeerItem = targets[i];
+        tasks.push((async (): Promise<void> => {
+          const ip: string = peer.tailscaleIPs[0];
+          this.tsPeerPingResults[peer.id] = 'Ping 中...';
+          this.tsPingRefreshTick = this.tsPingRefreshTick + 1;
+          const res: TailscalePingResult = await TailscaleControlService.pingPeer(ip);
+          if (res.ok) {
+            reachable = reachable + 1;
+            const ms: string = `${Math.round(res.latencyMs)} ms`;
+            this.tsPeerPingResults[peer.id] = res.direct
+              ? `直连 ${ms}`
+              : `DERP(${res.derpRegionCode.length > 0 ? res.derpRegionCode : 'relay'}) ${ms}`;
+          } else {
+            this.tsPeerPingResults[peer.id] = `超时: ${res.error}`;
+          }
+          done = done + 1;
+          this.batchPingProgress = `批量 Ping 中 ${done}/${targets.length} (${reachable} 可达)`;
+          this.tsPingRefreshTick = this.tsPingRefreshTick + 1;
+        })());
+      }
+      await Promise.all(tasks);
+      this.batchPingProgress = `批量 Ping 完成：${reachable}/${targets.length} 在线设备可达`;
+      this.tsBusyMessage = this.batchPingProgress;
+    } finally {
+      this.isBatchPingingPeers = false;
+    }
+  }
+
+  // ============== Phase 4: Self-hosted Overlay, Fail-Closed AI, Rule Test & Backup ==============
+  private async loadOverlayConfig(): Promise<void> {
+    const context = getContext(this) as common.Context;
+    const cfg: CustomOverlayConfig = await OverlayService.load(context);
+    this.overlayConfig = cfg;
+    this.syncOverlayDraftsFromConfig(cfg);
+  }
+
+  private syncOverlayDraftsFromConfig(cfg: CustomOverlayConfig): void {
+    this.overlayGroupNameDraft = cfg.selfHostedGroupName;
+    this.overlayProxiesDraft = cfg.customProxiesYaml;
+    this.overlayCustomRulesDraft = cfg.customRules.join('\n');
+    this.overlayAiDomainsDraft = cfg.aiDomains.join('\n');
+    this.overlayAiKeywordsDraft = cfg.aiKeywords.join(', ');
+    this.overlayDirectDomainsDraft = cfg.directDomains.join(', ');
+  }
+
+  private getAiProviderPresets(): AiProviderPreset[] {
+    return getAllAiProviderPresets();
+  }
+
+  private isAiProviderSelected(providerId: string): boolean {
+    return this.overlayConfig.aiProviders.indexOf(providerId) >= 0;
+  }
+
+  private toggleAiProviderSelection(providerId: string): void {
+    const next: CustomOverlayConfig = this.buildOverlayDraftConfig();
+    const list: string[] = [];
+    let removed: boolean = false;
+    for (let i = 0; i < next.aiProviders.length; i++) {
+      if (next.aiProviders[i] === providerId) {
+        removed = true;
+      } else {
+        list.push(next.aiProviders[i]);
+      }
+    }
+    if (!removed) {
+      list.push(providerId);
+    }
+    next.aiProviders = list;
+    this.overlayConfig = next;
+  }
+
+  private selectAllAiProviders(): void {
+    const next: CustomOverlayConfig = this.buildOverlayDraftConfig();
+    const presets: AiProviderPreset[] = getAllAiProviderPresets();
+    const ids: string[] = [];
+    for (let i = 0; i < presets.length; i++) {
+      ids.push(presets[i].id);
+    }
+    next.aiProviders = ids;
+    this.overlayConfig = next;
+  }
+
+  private selectCoreAiProviders(): void {
+    const next: CustomOverlayConfig = this.buildOverlayDraftConfig();
+    next.aiProviders = ['claude', 'gemini', 'openai'];
+    this.overlayConfig = next;
+  }
+
+  private splitOverlayList(raw: string): string[] {
+    const parts: string[] = raw.split(/[\r\n,;]+/);
+    const out: string[] = [];
+    for (let i = 0; i < parts.length; i++) {
+      const s: string = parts[i].trim();
+      if (s.length > 0) {
+        out.push(s);
+      }
+    }
+    return out;
+  }
+
+  private splitOverlayLines(raw: string): string[] {
+    const parts: string[] = raw.split(/\r?\n/);
+    const out: string[] = [];
+    for (let i = 0; i < parts.length; i++) {
+      const s: string = parts[i].trim();
+      if (s.length > 0) {
+        out.push(s);
+      }
+    }
+    return out;
+  }
+
+  private buildOverlayDraftConfig(): CustomOverlayConfig {
+    const providersCopy: string[] = [];
+    for (let i = 0; i < this.overlayConfig.aiProviders.length; i++) {
+      providersCopy.push(this.overlayConfig.aiProviders[i]);
+    }
+    return OverlayService.normalizeConfig({
+      enabled: this.overlayConfig.enabled,
+      selfHostedGroupName: this.overlayGroupNameDraft.trim().length > 0 ? this.overlayGroupNameDraft.trim() : DEFAULT_AI_GROUP_NAME,
+      failClosed: this.overlayConfig.failClosed,
+      aiStrictEnabled: this.overlayConfig.aiStrictEnabled,
+      aiProviders: providersCopy,
+      aiDomains: this.splitOverlayList(this.overlayAiDomainsDraft),
+      aiKeywords: this.splitOverlayList(this.overlayAiKeywordsDraft),
+      customProxiesYaml: this.overlayProxiesDraft,
+      customRules: this.splitOverlayLines(this.overlayCustomRulesDraft),
+      directDomains: this.splitOverlayList(this.overlayDirectDomainsDraft)
+    });
+  }
+
+  private toggleOverlayEnabled(): void {
+    const next: CustomOverlayConfig = this.buildOverlayDraftConfig();
+    next.enabled = !next.enabled;
+    this.overlayConfig = next;
+  }
+
+  private toggleOverlayAiStrict(): void {
+    const next: CustomOverlayConfig = this.buildOverlayDraftConfig();
+    next.aiStrictEnabled = !next.aiStrictEnabled;
+    this.overlayConfig = next;
+  }
+
+  private toggleOverlayAiFailClosed(): void {
+    const next: CustomOverlayConfig = this.buildOverlayDraftConfig();
+    next.failClosed = !next.failClosed;
+    this.overlayConfig = next;
+  }
+
+  private insertSelfHostedVlessTemplate(): void {
+    const tpl: string = [
+      '- name: 东京自建稳定出口',
+      '  type: vless',
+      '  server: your-node.example.com',
+      '  port: 443',
+      '  uuid: 00000000-0000-0000-0000-000000000000',
+      '  network: ws',
+      '  tls: true',
+      '  udp: true',
+      '  servername: your-node.example.com',
+      '  client-fingerprint: chrome',
+      '  ws-opts:',
+      '    path: /ws',
+      '    headers:',
+      '      Host: your-node.example.com'
+    ].join('\n');
+    const cur: string = this.overlayProxiesDraft.trim();
+    this.overlayProxiesDraft = cur.length > 0 ? `${cur}\n${tpl}` : tpl;
+    this.overlayBannerOk = true;
+    this.overlayBanner = '已填入 VLESS 模板，也可直接粘贴 vless:// / trojan:// / ss:// 分享链接';
+  }
+
+  private async saveOverlayConfig(): Promise<void> {
+    if (this.isSavingOverlay) {
+      return;
+    }
+    this.isSavingOverlay = true;
+    this.overlayBannerOk = true;
+    this.overlayBanner = '正在解析自建节点并执行融合校验...';
+    try {
+      const context = getContext(this) as common.Context;
+      const next: CustomOverlayConfig = this.buildOverlayDraftConfig();
+      // Auto-enable when user fills self-hosted nodes and clicks save
+      if (!next.enabled && next.customProxiesYaml.trim().length > 0) {
+        next.enabled = true;
+      }
+      const parsed: ParsedCustomProxies = OverlayService.parseCustomProxiesYaml(next.customProxiesYaml);
+
+      // Pre-validate merged runtime YAML with current profile (if any)
+      const current: ClashProfile | undefined = CoreService.getCurrentProfile(this.profileState);
+      if (current && current.filePath.length > 0) {
+        try {
+          if (await fileIo.access(current.filePath)) {
+            const rawYaml: string = await fileIo.readText(current.filePath);
+            const mergedYaml: string = await RuntimeConfigService.buildMergedRuntimeYaml(context, rawYaml, next);
+            const check: ConfigValidationResult = CoreBridgeService.validateConfig(mergedYaml);
+            if (!check.ok) {
+              this.overlayBannerOk = false;
+              this.overlayBanner = `融合校验失败${check.line > 0 ? ` (第 ${check.line} 行)` : ''}：${check.error}`;
+              this.statusMessage = this.overlayBanner;
+              return;
+            }
+          }
+        } catch (_err) {
+        }
+      }
+
+      const saved: boolean = await OverlayService.save(context, next);
+      if (!saved) {
+        this.overlayBannerOk = false;
+        this.overlayBanner = '保存覆写配置失败，请检查存储空间';
+        return;
+      }
+      this.overlayConfig = next;
+      this.syncOverlayDraftsFromConfig(next);
+      const modeDesc: string = !next.enabled
+        ? 'AI 自建覆写已关闭'
+        : (next.aiStrictEnabled && next.failClosed
+          ? (parsed.names.length > 0
+            ? `已选 ${next.aiProviders.length} 家 AI 严格走 [${parsed.names.join(', ')}]，不可达直接断开`
+            : `已选 ${next.aiProviders.length} 家 AI（未填自建节点，Fail-Closed 直接 REJECT）`)
+          : '已应用自定义规则');
+      this.overlayBannerOk = true;
+      this.overlayBanner = `保存成功！自建节点 ${parsed.names.length} 个 · ${modeDesc}（重连 VPN 生效）`;
+      this.statusMessage = this.overlayBanner;
+      this.recordLog('info', this.overlayBanner);
+    } finally {
+      this.isSavingOverlay = false;
+    }
+  }
+
+  private async exportCrossPlatformBackup(sanitize: boolean): Promise<void> {
+    const context = getContext(this) as common.Context;
+    const jsonText: string = await OverlayService.exportBackupBundleJson(context, sanitize);
+    try {
+      const data: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, jsonText);
+      await pasteboard.getSystemPasteboard().setData(data);
+      this.overlayBannerOk = true;
+      this.overlayBanner = sanitize
+        ? '已复制脱敏迁移包 JSON 到剪贴板（可导入 Windows 版或分享）'
+        : '已复制完整迁移包 JSON 到剪贴板（含自建节点/AI规则/Tailscale/订阅，可导入 Windows 版）';
+      this.statusMessage = this.overlayBanner;
+    } catch (_err) {
+      this.overlayBannerOk = false;
+      this.overlayBanner = '复制到剪贴板失败';
+    }
+  }
+
+  private async importCrossPlatformBackupFromClipboard(): Promise<void> {
+    try {
+      const data: pasteboard.PasteData = await pasteboard.getSystemPasteboard().getData();
+      const rawText: string = data.getPrimaryText();
+      if (!rawText || rawText.trim().length === 0) {
+        this.overlayBannerOk = false;
+        this.overlayBanner = '剪贴板为空，请先复制从 Windows 版或手机导出的 JSON 迁移包';
+        return;
+      }
+      const context = getContext(this) as common.Context;
+      const res: BackupImportResult = await OverlayService.importBackupBundleJson(context, rawText);
+      this.overlayBannerOk = res.ok;
+      this.overlayBanner = res.message;
+      this.statusMessage = res.message;
+      if (res.ok) {
+        await this.loadOverlayConfig();
+        await this.loadTailscalePrefs();
+        const nextState: ProfileState = await ProfileStore.load(context);
+        this.applyProfileState(nextState);
+        await this.refreshProxyNodes(nextState);
+        if (nextState.currentUid.length > 0) {
+          await this.loadProfileWorkspaceData(nextState.currentUid);
+        }
+      }
+    } catch (_err) {
+      this.overlayBannerOk = false;
+      this.overlayBanner = '读取剪贴板失败，请检查剪贴板权限';
+    }
+  }
+
+  private async runProxyRuleTest(customTarget?: string): Promise<void> {
+    const target: string = (customTarget !== undefined ? customTarget : this.proxyRuleTestInput).trim();
+    if (customTarget !== undefined) {
+      this.proxyRuleTestInput = target;
+    }
+    if (target.length === 0) {
+      this.proxyRuleTestOk = false;
+      this.proxyRuleTestIsReject = false;
+      this.proxyRuleTestResult = '请输入待测域名、URL 或 IP';
+      this.proxyRuleTestDetail = '';
+      return;
+    }
+    this.proxyRuleTestResult = `正在测试 ${target} 规则命中...`;
+    this.proxyRuleTestDetail = '';
+
+    // 1. Prefer live Mihomo rule engine when core is running
+    const live: LiveRuleTestResult = await TailscaleControlService.testRule(target, 443, 'tcp');
+    if (live.ok) {
+      const chainText: string = live.proxyChain.length > 0 ? live.proxyChain.join(' → ') : live.finalOutbound;
+      const isRej: boolean = live.finalOutbound.toUpperCase() === 'REJECT' || live.finalType.toLowerCase() === 'reject';
+      this.proxyRuleTestOk = true;
+      this.proxyRuleTestIsReject = isRej;
+      this.proxyRuleTestResult = `实时内核命中：${live.ruleRaw}`;
+      this.proxyRuleTestDetail = `链路：${chainText} (${live.finalType}) · 模式：${live.mode}`;
+      return;
+    }
+
+    // 2. Fallback to offline simulation on merged runtime YAML (including Overlay + Tailscale)
+    const context = getContext(this) as common.Context;
+    let sourceYaml: string = this.editorBaseText;
+    if (sourceYaml.trim().length === 0) {
+      const current: ClashProfile | undefined = CoreService.getCurrentProfile(this.profileState);
+      if (current && current.filePath.length > 0) {
+        try {
+          if (await fileIo.access(current.filePath)) {
+            sourceYaml = await fileIo.readText(current.filePath);
+          }
+        } catch (_err) {
+        }
+      }
+    }
+    if (sourceYaml.trim().length === 0) {
+      this.proxyRuleTestOk = false;
+      this.proxyRuleTestIsReject = false;
+      this.proxyRuleTestResult = live.error.length > 0 ? live.error : '请先导入配置或启动 VPN';
+      this.proxyRuleTestDetail = '';
+      return;
+    }
+    const mergedYaml: string = await RuntimeConfigService.buildMergedRuntimeYaml(context, sourceYaml);
+    const analysis: TrafficAnalysis = TrafficRuleAnalyzerService.analyze(mergedYaml);
+    const sim: RouteSimulationResult = TrafficRuleAnalyzerService.simulateRoute(analysis, target, this.proxyMode);
+    this.proxyRuleTestOk = true;
+    this.proxyRuleTestIsReject = sim.category === 'reject';
+    this.proxyRuleTestResult = `离线融合模拟：${sim.matchedRuleRaw}`;
+    this.proxyRuleTestDetail = `链路：${sim.chain.join(' → ')} · DNS：${sim.dnsNote}`;
+  }
+
+  private async runAllGroupsSpeedTest(): Promise<void> {
+    if (this.isSpeedTesting) {
+      this.statusMessage = '测速正在进行，请稍候';
+      return;
+    }
+    this.isSpeedTesting = true;
+    this.speedTestSummary = '';
+    this.speedTestProgress = '准备全量测速所有策略组...';
+    this.statusMessage = this.speedTestProgress;
+    await this.waitForUiUpdate(50);
+
+    try {
+      const ready: boolean = await this.ensureControllerReadyForProxyActions('全组测速');
+      if (!ready) {
+        this.speedTestProgress = '全组测速未开始：controller 未就绪';
+        this.speedTestSummary = this.speedTestProgress;
+        return;
+      }
+
+      const uniqueNames: string[] = [];
+      const seen: Record<string, boolean> = {};
+      for (let g = 0; g < this.proxyGroups.length; g++) {
+        const grp: ProxyGroupInfo = this.proxyGroups[g];
+        if (grp.name === 'GLOBAL') {
+          continue;
+        }
+        for (let j = 0; j < grp.all.length; j++) {
+          const name: string = grp.all[j];
+          if (name === 'DIRECT' || name === 'REJECT' || seen[name]) {
+            continue;
+          }
+          seen[name] = true;
+          uniqueNames.push(name);
+        }
+      }
+      if (uniqueNames.length === 0) {
+        this.speedTestProgress = '没有可测速节点';
+        this.statusMessage = this.speedTestProgress;
+        return;
+      }
+
+      let tested: number = 0;
+      let reachable: number = 0;
+      let timeout: number = 0;
+      const batchSize: number = 12;
+      this.speedTestProgress = `全组测速中 0/${uniqueNames.length}...`;
+
+      for (let offset = 0; offset < uniqueNames.length; offset += batchSize) {
+        const end: number = offset + batchSize > uniqueNames.length ? uniqueNames.length : offset + batchSize;
+        const batchNames: string[] = [];
+        const tasks: Promise<number>[] = [];
+        for (let i = offset; i < end; i++) {
+          const n: string = uniqueNames[i];
+          batchNames.push(n);
+          tasks.push(this.measureProxyNodeDelay({ name: n, meta: '', delay: '测试中...' }));
+        }
+        const delays: number[] = await Promise.all(tasks);
+        const updates: ProxyDelayUpdate[] = [];
+        for (let i = 0; i < delays.length; i++) {
+          const fmt = TcpDelayTestService.formatDelay(delays[i]);
+          updates.push({ name: batchNames[i], delay: fmt.delay, status: fmt.status });
+          tested = tested + 1;
+          if (delays[i] > 0) {
+            reachable = reachable + 1;
+          } else {
+            timeout = timeout + 1;
+          }
+        }
+        this.updateProxyNodeDelayBatch(updates);
+        this.speedTestProgress = `全组测速 ${tested}/${uniqueNames.length} · ${reachable} 可达 · ${timeout} 超时`;
+        this.statusMessage = this.speedTestProgress;
+        await this.waitForUiUpdate(0);
+      }
+      this.speedTestSummary = `全组测速完成 ${tested} 节点 · ${reachable} 可达 · ${timeout} 超时`;
+      this.speedTestProgress = this.speedTestSummary;
+      this.statusMessage = this.speedTestSummary;
+      this.applySelectedProxyGroup();
+    } finally {
+      this.isSpeedTesting = false;
+    }
+  }
+
+  private getExitNodeCandidates(): TailscalePeerItem[] {
+    const out: TailscalePeerItem[] = [];
+    for (let i = 0; i < this.tsControl.peers.length; i++) {
+      if (this.tsControl.peers[i].exitNodeOption) {
+        out.push(this.tsControl.peers[i]);
+      }
+    }
+    return out;
+  }
+
+  private async copyPlainText(label: string, text: string): Promise<void> {
+    if (text.length === 0) {
+      return;
+    }
+    try {
+      const data: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text);
+      await pasteboard.getSystemPasteboard().setData(data);
+      this.statusMessage = `已复制${label}：${text}`;
+      this.tsBusyMessage = this.statusMessage;
+    } catch (_err) {
+      this.statusMessage = `复制${label}失败`;
+    }
+  }
+
+  private async addDiscoveredRouteToMihomoRules(cidr: string): Promise<void> {
+    const ruleLine: string = `IP-CIDR,${cidr},${this.tsPrefs.proxyName.length > 0 ? this.tsPrefs.proxyName : 'Tailscale'},no-resolve`;
+    await this.quickAppendRuleToCurrentProfile(ruleLine, `添加 Tailscale 子网路由 ${cidr}`, true);
+  }
+
+  private async addTailnetSuffixToMihomoRules(suffix: string): Promise<void> {
+    const ruleLine: string = `DOMAIN-SUFFIX,${suffix},${this.tsPrefs.proxyName.length > 0 ? this.tsPrefs.proxyName : 'Tailscale'}`;
+    await this.quickAppendRuleToCurrentProfile(ruleLine, `添加 Tailnet 域名规则 ${suffix}`, true);
+  }
+
+  private async addSplitDnsToMihomoProfile(domain: string): Promise<void> {
+    const targetUid: string = this.editingProfileUid.length > 0 ? this.editingProfileUid : this.profileState.currentUid;
+    if (targetUid.length === 0) {
+      this.tsBusyMessage = '请先在配置页启用一个 Mihomo 配置';
+      this.statusMessage = this.tsBusyMessage;
+      return;
+    }
+    if (this.editingProfileUid !== targetUid) {
+      await this.loadProfileWorkspaceData(targetUid);
+    }
+    const proxyName: string = this.tsPrefs.proxyName.length > 0 ? this.tsPrefs.proxyName : 'Tailscale';
+    const nextYaml: string = TailscalePrefsService.applySplitDnsDomainToProfileYaml(this.editorBaseText, domain, proxyName);
+    if (nextYaml === this.editorBaseText) {
+      this.tsBusyMessage = `SplitDNS 域名 ${domain} 的 DNS 与分流规则均已就绪`;
+      this.statusMessage = this.tsBusyMessage;
+      return;
+    }
+    await this.commitRuleMutation(nextYaml, `联动 Tailscale SplitDNS ${domain}`);
+    this.tsSplitDnsNeedReload = this.liveConnected;
+  }
+
+  private async runTailscaleDnsTest(customHost?: string): Promise<void> {
+    const target: string = (customHost !== undefined ? customHost : this.tsDnsTestQuery).trim();
+    if (target.length === 0) {
+      this.tsDnsTestResult = '请输入待测域名（例如 dsh-10.sjfarm.cc）';
+      return;
+    }
+    if (customHost !== undefined) {
+      this.tsDnsTestQuery = target;
+    }
+    if (!this.tsControl.reachable) {
+      this.tsDnsTestResult = '请先连接 VPN 后再测试 SplitDNS 解析';
+      return;
+    }
+    this.tsDnsTestResult = `正在通过 Tailscale 解析 ${target} ...`;
+    const res: TailscaleDnsQueryResult = await TailscaleControlService.queryDns(target, 'A');
+    if (res.ok && res.answers.length > 0) {
+      const via: string = res.resolvers.length > 0 ? `（上游 ${res.resolvers.join(', ')}）` : '';
+      this.tsDnsTestResult = `解析成功：${res.answers.join(', ')} · ${Math.round(res.latencyMs)} ms${via}`;
+    } else {
+      this.tsDnsTestResult = `解析失败：${res.error.length > 0 ? res.error : '无记录'}`;
+    }
+  }
+
+  // ============== Phase 3: Visual Traffic Rules & Route Simulator ==============
+  private runRouteSimulation(customQuery?: string): void {
+    const q: string = customQuery !== undefined ? customQuery : this.simQuery;
+    if (customQuery !== undefined) {
+      this.simQuery = customQuery;
+    }
+    this.simResult = TrafficRuleAnalyzerService.simulateRoute(this.trafficAnalysis, q, this.proxyMode);
+  }
+
+  private getFilteredRules(): ParsedRuleItem[] {
+    const q: string = this.ruleSearchText.trim().toLowerCase();
+    if (q.length === 0) {
+      return this.trafficAnalysis.rules.slice(0, 80);
+    }
+    const out: ParsedRuleItem[] = [];
+    for (let i = 0; i < this.trafficAnalysis.rules.length; i++) {
+      const r: ParsedRuleItem = this.trafficAnalysis.rules[i];
+      if (r.raw.toLowerCase().indexOf(q) >= 0 || r.chainLabel.toLowerCase().indexOf(q) >= 0) {
+        out.push(r);
+      }
+      if (out.length >= 80) {
+        break;
+      }
+    }
+    return out;
+  }
+
+  private async quickAppendRuleToCurrentProfile(ruleLine: string, note: string, prepend: boolean): Promise<void> {
+    const targetUid: string = this.editingProfileUid.length > 0 ? this.editingProfileUid : this.profileState.currentUid;
+    if (targetUid.length === 0) {
+      this.tsBusyMessage = '请先在配置页启用一个 Mihomo 配置';
+      this.statusMessage = this.tsBusyMessage;
+      return;
+    }
+    if (this.editingProfileUid !== targetUid) {
+      await this.loadProfileWorkspaceData(targetUid);
+    }
+    if (TrafficRuleAnalyzerService.hasRuleLine(this.editorBaseText, ruleLine)) {
+      this.tsBusyMessage = `规则已存在：${ruleLine}`;
+      this.statusMessage = this.tsBusyMessage;
+      return;
+    }
+    const nextYaml: string = TrafficRuleAnalyzerService.addRuleToYaml(this.editorBaseText, ruleLine, prepend);
+    await this.commitRuleMutation(nextYaml, note);
+  }
+
+  private async commitRuleMutation(nextYaml: string, note: string): Promise<void> {
+    const profile: ClashProfile | undefined = this.findProfileByUid(this.editingProfileUid);
+    if (!profile) {
+      this.statusMessage = '未选中配置';
+      return;
+    }
+    const check: ConfigValidationResult = CoreBridgeService.validateConfig(nextYaml);
+    if (!check.ok) {
+      this.statusMessage = `规则修改校验失败：${check.error}`;
+      this.tsBusyMessage = this.statusMessage;
+      return;
+    }
+    const context = getContext(this) as common.Context;
+    const commit: VersionCommitResult = await ProfileVersionService.commitNewVersion(
+      context,
+      profile,
+      nextYaml,
+      'rule',
+      note
+    );
+    if (!commit.ok) {
+      this.statusMessage = commit.message;
+      return;
+    }
+    this.applyProfileState(commit.state);
+    this.versionHistory = ProfileVersionService.reversedVersions(commit.manifest);
+    this.activeVersionNumber = commit.version;
+    this.editorBaseText = nextYaml;
+    this.editorDraftText = nextYaml;
+    this.trafficAnalysis = TrafficRuleAnalyzerService.analyze(nextYaml);
+    if (this.simQuery.trim().length > 0) {
+      this.simResult = TrafficRuleAnalyzerService.simulateRoute(this.trafficAnalysis, this.simQuery, this.proxyMode);
+    }
+    this.statusMessage = `${note} · 已存为 v${commit.version}`;
+    this.tsBusyMessage = this.statusMessage;
+    this.recordLog('info', this.statusMessage);
+  }
+
+  private async submitNewRule(): Promise<void> {
+    const payload: string = this.newRulePayload.trim();
+    if (this.newRuleType !== 'MATCH' && payload.length === 0) {
+      this.statusMessage = '请输入域名、关键词或 IP-CIDR';
+      return;
+    }
+    const target: string = this.newRuleTarget.trim().length > 0 ? this.newRuleTarget.trim() : 'Tailscale';
+    let line: string = '';
+    if (this.newRuleType === 'MATCH') {
+      line = `MATCH,${target}`;
+    } else if (this.newRuleType === 'IP-CIDR' || this.newRuleType === 'IP-CIDR6') {
+      line = `${this.newRuleType},${payload},${target},no-resolve`;
+    } else {
+      line = `${this.newRuleType},${payload},${target}`;
+    }
+    await this.quickAppendRuleToCurrentProfile(line, `新增规则 ${line}`, this.newRulePrepend);
+    this.newRulePayload = '';
+    this.showAddRulePanel = false;
+  }
+
+  private async deleteVisualRule(rule: ParsedRuleItem): Promise<void> {
+    const nextYaml: string = TrafficRuleAnalyzerService.deleteRuleFromYaml(this.editorBaseText, rule.lineIndex);
+    await this.commitRuleMutation(nextYaml, `删除规则 #${rule.index}`);
+  }
+
+  private async moveVisualRule(ruleIndex1Based: number, delta: number): Promise<void> {
+    const pos: number = ruleIndex1Based - 1;
+    const nextYaml: string = TrafficRuleAnalyzerService.moveRuleInYaml(this.editorBaseText, this.trafficAnalysis.rules, pos, delta);
+    if (nextYaml === this.editorBaseText) {
+      return;
+    }
+    await this.commitRuleMutation(nextYaml, delta < 0 ? `上移规则 #${ruleIndex1Based}` : `下移规则 #${ruleIndex1Based}`);
+  }
+
+  private categoryAccentColor(cat: string): string {
+    if (cat === 'tailscale') {
+      return '#0F766E';
+    }
+    if (cat === 'proxy') {
+      return '#2563EB';
+    }
+    if (cat === 'reject') {
+      return '#DC2626';
+    }
+    return '#475569';
+  }
+
+  private categoryBgColor(cat: string): string {
+    if (cat === 'tailscale') {
+      return '#E6FFFB';
+    }
+    if (cat === 'proxy') {
+      return '#EFF6FF';
+    }
+    if (cat === 'reject') {
+      return '#FEF2F2';
+    }
+    return '#F1F5F9';
+  }
+
   build() {
     Column() {
       this.AppBar()
@@ -1873,6 +3106,8 @@ struct Index {
           this.HomeScreen()
         } else if (this.currentTab === 'proxies') {
           this.ProxyScreen()
+        } else if (this.currentTab === 'tailscale') {
+          this.TailscaleScreen()
         } else if (this.currentTab === 'profiles') {
           this.ProfileScreen()
         } else {
@@ -1921,6 +3156,10 @@ struct Index {
           this.currentTab = item.key;
           if (item.key === 'diagnostics') {
             this.refreshCoreLogs();
+          } else if (item.key === 'tailscale') {
+            this.refreshTailscaleStatus();
+          } else if (item.key === 'profiles' && this.editingProfileUid.length === 0 && this.profileState.currentUid.length > 0) {
+            this.loadProfileWorkspaceData(this.profileState.currentUid);
           }
         })
       }, (item: NavItem) => item.key)
@@ -2030,30 +3269,48 @@ struct Index {
 
   @Builder
   private ProfileRow(item: ClashProfile) {
-    Row() {
-      Column() {
-        Text(item.name).fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A')
-        Text(`${item.type === 'remote' ? '远程订阅' : '本地配置'} · ${formatProfileUpdatedAt(item.updatedAt)} · ${item.traffic}`)
-          .fontSize(12).fontColor('#64748B').margin({ top: 3 })
-        Text(`${item.nodeCount} 个节点 · ${item.filePath.length > 0 ? '已下载' : '未下载'}`)
-          .fontSize(11).fontColor('#94A3B8').margin({ top: 2 })
+    Column({ space: 8 }) {
+      Row({ space: 6 }) {
+        Column() {
+          Text(item.name).fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A')
+          Text(`${item.type === 'remote' ? '远程订阅' : '本地配置'} · ${formatProfileUpdatedAt(item.updatedAt)} · ${item.traffic}`)
+            .fontSize(12).fontColor('#64748B').margin({ top: 3 })
+          Text(`${item.nodeCount} 个节点 · ${item.filePath.length > 0 ? '已就绪' : '未下载'}`)
+            .fontSize(11).fontColor('#94A3B8').margin({ top: 2 })
+        }
+        .alignItems(HorizontalAlign.Start).layoutWeight(1)
+        if (item.uid === this.profileState.currentUid) {
+          this.Pill('当前', '#0F766E', '#E6FFFB')
+        } else {
+          Button('启用').height(28).fontSize(12).fontColor('#2563EB')
+            .backgroundColor('#EFF6FF').borderRadius(8)
+            .onClick(() => { this.activateProfile(item.uid) })
+        }
+        Button('删').height(28).fontSize(12).fontColor('#DC2626')
+          .backgroundColor('#FEF2F2').borderRadius(8)
+          .onClick(() => { this.removeProfile(item.uid) })
       }
-      .alignItems(HorizontalAlign.Start).layoutWeight(1)
-      if (item.uid === this.profileState.currentUid) {
-        this.Pill('当前', '#0F766E', '#E6FFFB')
-        Button('更新').height(30).fontSize(12).fontColor('#2563EB')
-          .backgroundColor('#EFF6FF').borderRadius(8)
-          .onClick(() => { this.updateProfile(item.uid) })
-      } else {
-        Button('启用').height(30).fontSize(12).fontColor('#2563EB')
-          .backgroundColor('#EFF6FF').borderRadius(8)
-          .onClick(() => { this.activateProfile(item.uid) })
+      .width('100%')
+
+      Row({ space: 6 }) {
+        Button('版本历史').layoutWeight(1).height(30).fontSize(12).fontColor('#334155')
+          .backgroundColor('#F1F5F9').borderRadius(6)
+          .onClick(() => { this.openProfileWorkspace(item.uid, 'list', true) })
+        Button('编辑/校验').layoutWeight(1).height(30).fontSize(12).fontColor('#0F766E')
+          .backgroundColor('#E6FFFB').borderRadius(6)
+          .onClick(() => { this.openProfileWorkspace(item.uid, 'editor', false) })
+        Button('流量规则').layoutWeight(1).height(30).fontSize(12).fontColor('#2563EB')
+          .backgroundColor('#EFF6FF').borderRadius(6)
+          .onClick(() => { this.openProfileWorkspace(item.uid, 'flow', false) })
+        if (item.type === 'remote') {
+          Button('更新').height(30).fontSize(12).fontColor('#2563EB')
+            .backgroundColor('#EFF6FF').borderRadius(6)
+            .onClick(() => { this.updateProfile(item.uid) })
+        }
       }
-      Button('删').height(30).fontSize(12).fontColor('#DC2626')
-        .backgroundColor('#FEF2F2').borderRadius(8)
-        .onClick(() => { this.removeProfile(item.uid) })
+      .width('100%')
     }
-    .padding(10).backgroundColor(item.uid === this.profileState.currentUid ? '#E6FFFB' : '#FFFFFF')
+    .padding(10).backgroundColor(item.uid === this.profileState.currentUid ? '#F0FDFA' : '#FFFFFF')
     .borderRadius(8).border({ width: 1, color: item.uid === this.profileState.currentUid ? '#99F6E4' : '#E2E8F0' })
   }
 
@@ -2276,16 +3533,60 @@ struct Index {
           }
         }
 
+        // Rule Match Test Card (live Mihomo engine + offline overlay fallback)
+        Column({ space: 8 }) {
+          Text('规则命中测试（查实时内核规则）').fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A').width('100%')
+          Row({ space: 6 }) {
+            TextInput({ text: this.proxyRuleTestInput, placeholder: '输入域名/URL/IP，如 claude.ai / 192.168.1.11' })
+              .layoutWeight(1).height(36).fontSize(12).backgroundColor('#F8FAFC').borderRadius(8)
+              .onChange((val: string) => { this.proxyRuleTestInput = val })
+            Button('测试命中').height(36).fontSize(12).fontColor('#FFFFFF')
+              .backgroundColor('#2563EB').borderRadius(8)
+              .onClick(() => { this.runProxyRuleTest() })
+          }
+          .width('100%')
+
+          Row({ space: 6 }) {
+            Button('claude.ai').height(26).fontSize(11).fontColor('#2563EB').backgroundColor('#EFF6FF').borderRadius(12)
+              .onClick(() => { this.runProxyRuleTest('claude.ai') })
+            Button('dsh-10').height(26).fontSize(11).fontColor('#0F766E').backgroundColor('#E6FFFB').borderRadius(12)
+              .onClick(() => { this.runProxyRuleTest('dsh-10.in.sjfarm.cc') })
+            Button('192.168.1.11').height(26).fontSize(11).fontColor('#0F766E').backgroundColor('#E6FFFB').borderRadius(12)
+              .onClick(() => { this.runProxyRuleTest('192.168.1.11') })
+            Button('baidu.com').height(26).fontSize(11).fontColor('#475569').backgroundColor('#F1F5F9').borderRadius(12)
+              .onClick(() => { this.runProxyRuleTest('www.baidu.com') })
+          }
+          .width('100%')
+
+          if (this.proxyRuleTestResult.length > 0) {
+            Column({ space: 4 }) {
+              Text(this.proxyRuleTestResult)
+                .fontSize(12).fontWeight(FontWeight.Bold).width('100%')
+                .fontColor(!this.proxyRuleTestOk || this.proxyRuleTestIsReject ? '#DC2626' : '#0F766E')
+              if (this.proxyRuleTestDetail.length > 0) {
+                Text(this.proxyRuleTestDetail).fontSize(11).fontColor('#334155').width('100%')
+              }
+            }
+            .width('100%').padding(8).borderRadius(8)
+            .backgroundColor(!this.proxyRuleTestOk || this.proxyRuleTestIsReject ? '#FEF2F2' : '#F0FDFA')
+            .border({ width: 1, color: !this.proxyRuleTestOk || this.proxyRuleTestIsReject ? '#FECACA' : '#99F6E4' })
+          }
+        }
+        .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+
         Column({ space: 8 }) {
           Row() {
-            Text(`节点列表 · ${this.getVisibleProxyNodes().length}/${this.proxyNodes.length}`).fontSize(15).fontWeight(FontWeight.Bold)
+            Text(`节点 · ${this.getVisibleProxyNodes().length}/${this.proxyNodes.length}`).fontSize(14).fontWeight(FontWeight.Bold)
             Row({ space: 6 }) {
-              Text('同步').height(30).width(58).fontSize(12).textAlign(TextAlign.Center)
+              Text('同步').height(30).width(48).fontSize(12).textAlign(TextAlign.Center)
                 .fontColor('#2563EB').backgroundColor('#EFF6FF').borderRadius(8)
                 .onClick(() => { this.refreshControllerProxies() })
-              Text(this.isSpeedTesting ? '测速中' : '测速').height(30).width(72).fontSize(12).textAlign(TextAlign.Center)
+              Text(this.isSpeedTesting ? '测速中' : '本组测速').height(30).width(66).fontSize(12).textAlign(TextAlign.Center)
                 .fontColor('#FFFFFF').backgroundColor(this.isSpeedTesting ? '#64748B' : '#2563EB').borderRadius(8)
                 .onClick(async () => { await this.runRealSpeedTest() })
+              Text(this.isSpeedTesting ? '...' : '全组测速').height(30).width(66).fontSize(12).textAlign(TextAlign.Center)
+                .fontColor('#FFFFFF').backgroundColor(this.isSpeedTesting ? '#64748B' : '#0F766E').borderRadius(8)
+                .onClick(async () => { await this.runAllGroupsSpeedTest() })
             }
           }
           .width('100%').justifyContent(FlexAlign.SpaceBetween)
@@ -2315,43 +3616,918 @@ struct Index {
     .layoutWeight(1)
   }
 
-  // ============== ProfileScreen ==============
+  // ============== ProfileScreen (Configs / Overlay / Editor / Traffic Flow) ==============
   @Builder
   private ProfileScreen() {
     Scroll() {
       Column({ space: 12 }) {
+        Row({ space: 6 }) {
+          Column() { this.ModeButton('配置列表', this.profileSubTab === 'list') }
+            .layoutWeight(1).onClick(() => { this.profileSubTab = 'list' })
+          Column() { this.ModeButton('自建与AI', this.profileSubTab === 'overlay') }
+            .layoutWeight(1).onClick(() => {
+              this.profileSubTab = 'overlay';
+              this.loadOverlayConfig();
+            })
+          Column() { this.ModeButton('编辑', this.profileSubTab === 'editor') }
+            .layoutWeight(1).onClick(() => {
+              this.profileSubTab = 'editor';
+              if (this.editingProfileUid.length === 0 && this.profileState.currentUid.length > 0) {
+                this.loadProfileWorkspaceData(this.profileState.currentUid);
+              }
+            })
+          Column() { this.ModeButton('规则', this.profileSubTab === 'flow') }
+            .layoutWeight(1).onClick(() => {
+              this.profileSubTab = 'flow';
+              if (this.editingProfileUid.length === 0 && this.profileState.currentUid.length > 0) {
+                this.loadProfileWorkspaceData(this.profileState.currentUid);
+              }
+            })
+        }
+        .padding(4).backgroundColor('#EEF2F7').borderRadius(8)
+
+        if (this.profileSubTab === 'list') {
+          this.ProfileListAndVersionsSubScreen()
+        } else if (this.profileSubTab === 'overlay') {
+          this.ProfileOverlaySubScreen()
+        } else if (this.profileSubTab === 'editor') {
+          this.ProfileEditorSubScreen()
+        } else {
+          this.ProfileFlowSubScreen()
+        }
+      }
+      .padding(16)
+    }
+    .layoutWeight(1)
+  }
+
+  @Builder
+  private ProfileListAndVersionsSubScreen() {
+    Column({ space: 12 }) {
+      Row({ space: 8 }) {
+        Button('导入订阅').layoutWeight(1).height(38).fontColor('#FFFFFF')
+          .backgroundColor('#0F766E').borderRadius(8)
+          .onClick(() => { this.showImportPanel = !this.showImportPanel })
+        Button('本地文件').layoutWeight(1).height(38).fontColor('#0F172A')
+          .backgroundColor('#EEF2F7').borderRadius(8)
+          .onClick(() => { this.importLocalFile() })
+        Button('剪贴板').layoutWeight(1).height(38).fontColor('#0F172A')
+          .backgroundColor('#EEF2F7').borderRadius(8)
+          .onClick(() => { this.importFromClipboard() })
+      }
+
+      if (this.showImportPanel) { this.ImportPanel() }
+
+      Column({ space: 8 }) {
+        this.SectionTitle(`配置列表 · ${this.profileState.items.length}`, '全量更新')
+        if (this.profileState.items.length === 0) {
+          this.EmptyState('还没有配置', '先导入订阅或本地 YAML，即可开启版本管理、在线编辑与流量可视化。')
+        } else {
+          ForEach(this.profileState.items, (item: ClashProfile) => {
+            this.ProfileRow(item)
+          }, (item: ClashProfile) => `${item.uid}-${item.updatedAt}-${item.nodeCount}`)
+        }
+      }
+      .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+
+      if (this.editingProfileUid.length > 0) {
+        Column({ space: 8 }) {
+          Row() {
+            Column({ space: 2 }) {
+              Text(`版本历史 · ${this.editingProfileName}`).fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A')
+              Text(`当前激活 v${this.activeVersionNumber} · 共 ${this.versionHistory.length} 个快照（默认折叠以保持界面整洁）`)
+                .fontSize(11).fontColor('#64748B')
+            }
+            .alignItems(HorizontalAlign.Start).layoutWeight(1)
+            Button(this.showVersionHistory ? '收起历史' : `展开历史 (${this.versionHistory.length})`)
+              .height(30).fontSize(12)
+              .fontColor(this.showVersionHistory ? '#475569' : '#2563EB')
+              .backgroundColor(this.showVersionHistory ? '#F1F5F9' : '#EFF6FF')
+              .borderRadius(8)
+              .onClick(() => { this.showVersionHistory = !this.showVersionHistory })
+          }
+          .width('100%')
+
+          if (this.showVersionHistory) {
+            if (this.versionHistory.length === 0) {
+              this.EmptyState('暂无历史快照', '修改并保存配置后会自动生成不可变版本记录。')
+            } else {
+              ForEach(this.versionHistory, (ver: ProfileVersionEntry) => {
+                this.VersionHistoryRow(ver)
+              }, (ver: ProfileVersionEntry) => `ver-${ver.version}-${this.activeVersionNumber}`)
+            }
+          }
+        }
+        .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+      }
+
+      if (this.showDiffPanel) {
+        this.ProfileDiffCard()
+      }
+
+      Column({ space: 10 }) {
+        this.SectionTitle('配置摘要', '')
         Row({ space: 8 }) {
-          Button('导入订阅').layoutWeight(1).height(38).fontColor('#FFFFFF')
-            .backgroundColor('#0F766E').borderRadius(8)
-            .onClick(() => { this.showImportPanel = !this.showImportPanel })
-          Button('本地文件').layoutWeight(1).height(38).fontColor('#0F172A')
-            .backgroundColor('#EEF2F7').borderRadius(8)
-            .onClick(() => { this.importLocalFile() })
-          Button('剪贴板').layoutWeight(1).height(38).fontColor('#0F172A')
-            .backgroundColor('#EEF2F7').borderRadius(8)
-            .onClick(() => { this.importFromClipboard() })
+          this.Metric('订阅', `${this.profileState.items.length}`)
+          this.Metric('节点', `${this.proxyNodes.length}`)
+          this.Metric('规则', `${this.trafficAnalysis.rules.length}`)
+        }
+      }
+      .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+    }
+  }
+
+  @Builder
+  private VersionHistoryRow(ver: ProfileVersionEntry) {
+    Column({ space: 6 }) {
+      Row({ space: 6 }) {
+        Text(`v${ver.version}`).fontSize(13).fontWeight(FontWeight.Bold)
+          .fontColor(ver.version === this.activeVersionNumber ? '#0F766E' : '#0F172A')
+        this.Pill(ProfileVersionService.sourceLabel(ver.source), '#2563EB', '#EFF6FF')
+        if (ver.version === this.activeVersionNumber) {
+          this.Pill('激活中', '#0F766E', '#E6FFFB')
+        }
+        Blank()
+        Text(formatProfileUpdatedAt(ver.createdAt)).fontSize(11).fontColor('#64748B')
+      }
+      .width('100%')
+
+      Text(`${ver.note} · ${ver.nodeCount} 节点 / ${ver.ruleCount} 规则`).fontSize(12).fontColor('#475569').width('100%')
+
+      Row({ space: 6 }) {
+        Button('载入编辑').layoutWeight(1).height(28).fontSize(11).fontColor('#334155')
+          .backgroundColor('#F1F5F9').borderRadius(6)
+          .onClick(() => { this.loadVersionIntoEditor(ver.version) })
+        if (ver.version !== this.activeVersionNumber) {
+          Button('对比 Diff').layoutWeight(1).height(28).fontSize(11).fontColor('#2563EB')
+            .backgroundColor('#EFF6FF').borderRadius(6)
+            .onClick(() => { this.compareHistoryVersion(ver.version) })
+          Button('回滚至此版').layoutWeight(1).height(28).fontSize(11).fontColor('#D97706')
+            .backgroundColor('#FFF7ED').borderRadius(6)
+            .onClick(() => { this.rollbackToHistoryVersion(ver.version) })
+        }
+      }
+      .width('100%')
+    }
+    .padding(10)
+    .backgroundColor(ver.version === this.activeVersionNumber ? '#F0FDFA' : '#F8FAFC')
+    .borderRadius(8)
+    .border({ width: 1, color: ver.version === this.activeVersionNumber ? '#99F6E4' : '#E2E8F0' })
+  }
+
+  @Builder
+  private ProfileOverlaySubScreen() {
+    Column({ space: 12 }) {
+      Column({ space: 10 }) {
+        Row() {
+          Text('🛡️ AI 严格走自建节点').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#0F172A').layoutWeight(1)
+          this.Pill(
+            this.overlayConfig.enabled ? `已启用 · ${this.overlayConfig.aiProviders.length} 家 AI` : '未启用',
+            this.overlayConfig.enabled ? '#0F766E' : '#64748B',
+            this.overlayConfig.enabled ? '#E6FFFB' : '#F1F5F9'
+          )
+        }
+        .width('100%')
+
+        Column() {
+          this.SwitchRow('启用 AI 严格自建保护', '默认 Fail-Closed：所选 AI 仅走自建出口，不可达直接断开（更新订阅永不覆盖）', this.overlayConfig.enabled)
+        }.onClick(() => { this.toggleOverlayEnabled() })
+
+        Row() {
+          Text('第 1 步：勾选哪些 AI 走自建（默认全选）').fontSize(12).fontWeight(FontWeight.Bold).fontColor('#0F172A').layoutWeight(1)
+          Button('全选').height(26).fontSize(11).fontColor('#0F766E').backgroundColor('#E6FFFB').borderRadius(6)
+            .onClick(() => { this.selectAllAiProviders() })
+          Button('仅核心三家').height(26).fontSize(11).fontColor('#2563EB').backgroundColor('#EFF6FF').borderRadius(6).margin({ left: 6 })
+            .onClick(() => { this.selectCoreAiProviders() })
+        }
+        .width('100%')
+
+        Flex({ wrap: FlexWrap.Wrap }) {
+          ForEach(this.getAiProviderPresets(), (preset: AiProviderPreset) => {
+            Column({ space: 2 }) {
+              Text(`${this.isAiProviderSelected(preset.id) ? '✓ ' : ''}${preset.label}`)
+                .fontSize(12).fontWeight(FontWeight.Bold)
+                .fontColor(this.isAiProviderSelected(preset.id) ? '#FFFFFF' : '#334155')
+              Text(preset.subtitle)
+                .fontSize(10)
+                .fontColor(this.isAiProviderSelected(preset.id) ? '#CCFBF1' : '#64748B')
+                .maxLines(1)
+            }
+            .alignItems(HorizontalAlign.Start)
+            .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+            .margin({ right: 8, bottom: 8 })
+            .borderRadius(8)
+            .backgroundColor(this.isAiProviderSelected(preset.id) ? '#0F766E' : '#F8FAFC')
+            .border({ width: 1, color: this.isAiProviderSelected(preset.id) ? '#0F766E' : '#CBD5E1' })
+            .onClick(() => { this.toggleAiProviderSelection(preset.id) })
+          }, (preset: AiProviderPreset) => `ai-preset-${preset.id}-${this.isAiProviderSelected(preset.id) ? '1' : '0'}`)
+        }
+        .width('100%')
+
+        Row() {
+          Text('第 2 步：粘贴自建节点（vless:// 等链接或 YAML）').fontSize(12).fontWeight(FontWeight.Bold).fontColor('#0F172A').layoutWeight(1)
+          Button('填入示例').height(26).fontSize(11).fontColor('#2563EB')
+            .backgroundColor('#EFF6FF').borderRadius(6)
+            .onClick(() => { this.insertSelfHostedVlessTemplate() })
+        }
+        .width('100%')
+
+        TextArea({ text: this.overlayProxiesDraft, placeholder: '最简方式：直接粘贴 vless:// / trojan:// / ss:// / hy2:// 节点链接（一行一个）\n或粘贴标准 Clash YAML 节点片段' })
+          .width('100%').height(130).fontSize(12).fontColor('#0F172A')
+          .backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#CBD5E1' })
+          .onChange((val: string) => { this.overlayProxiesDraft = val })
+
+        Row() {
+          Text('高级自定义（补充规则 / 额外域名 / Fail-Closed）').fontSize(12).fontWeight(FontWeight.Medium).fontColor('#475569').layoutWeight(1)
+          Button(this.showOverlayAdvanced ? '收起高级' : '展开高级').height(26).fontSize(11)
+            .fontColor('#475569').backgroundColor('#F1F5F9').borderRadius(6)
+            .onClick(() => { this.showOverlayAdvanced = !this.showOverlayAdvanced })
+        }
+        .width('100%')
+
+        if (this.showOverlayAdvanced) {
+          Column({ space: 8 }) {
+            Column() {
+              this.SwitchRow('启用 AI 严格分流规则', '关闭后仅注入自建节点与自定义规则', this.overlayConfig.aiStrictEnabled)
+            }.onClick(() => { this.toggleOverlayAiStrict() })
+
+            Column() {
+              this.SwitchRow('Fail-Closed 不可达直接断开', 'AI 组仅含自建节点（未填时 REJECT），绝不漏给国内或商业节点', this.overlayConfig.failClosed)
+            }.onClick(() => { this.toggleOverlayAiFailClosed() })
+
+            Text('AI 策略组名称').fontSize(12).fontWeight(FontWeight.Medium).fontColor('#334155').width('100%')
+            TextInput({ text: this.overlayGroupNameDraft, placeholder: DEFAULT_AI_GROUP_NAME })
+              .height(36).fontSize(12).backgroundColor('#F8FAFC').borderRadius(8)
+              .onChange((val: string) => { this.overlayGroupNameDraft = val })
+
+            Text('自定义最高优先级规则（每行一条）').fontSize(12).fontWeight(FontWeight.Medium).fontColor('#334155').width('100%')
+            TextArea({ text: this.overlayCustomRulesDraft, placeholder: 'IP-CIDR,192.168.1.0/24,Tailscale,no-resolve\nDOMAIN-SUFFIX,tuyacn.com,DIRECT' })
+              .width('100%').height(90).fontSize(12).fontColor('#0F172A')
+              .backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#CBD5E1' })
+              .onChange((val: string) => { this.overlayCustomRulesDraft = val })
+
+            Text('额外补充 AI 域名后缀（预设已内置主流 AI，可留空）').fontSize(12).fontWeight(FontWeight.Medium).fontColor('#334155').width('100%')
+            TextArea({ text: this.overlayAiDomainsDraft, placeholder: '留空即可使用上方一键勾选预设' })
+              .width('100%').height(80).fontSize(12).fontColor('#0F172A')
+              .backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#CBD5E1' })
+              .onChange((val: string) => { this.overlayAiDomainsDraft = val })
+
+            Text('额外补充 AI 关键词（逗号分隔，可留空）').fontSize(12).fontWeight(FontWeight.Medium).fontColor('#334155').width('100%')
+            TextInput({ text: this.overlayAiKeywordsDraft, placeholder: '留空即可' })
+              .height(36).fontSize(12).backgroundColor('#F8FAFC').borderRadius(8)
+              .onChange((val: string) => { this.overlayAiKeywordsDraft = val })
+
+            Text('直连保护域名（自建节点的 server 已自动保护）').fontSize(12).fontWeight(FontWeight.Medium).fontColor('#334155').width('100%')
+            TextInput({ text: this.overlayDirectDomainsDraft, placeholder: 'derp.sjfarm.cc' })
+              .height(36).fontSize(12).backgroundColor('#F8FAFC').borderRadius(8)
+              .onChange((val: string) => { this.overlayDirectDomainsDraft = val })
+          }
+          .width('100%').padding(10).backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#E2E8F0' })
         }
 
-        if (this.showImportPanel) { this.ImportPanel() }
+        if (this.overlayBanner.length > 0) {
+          Text(this.overlayBanner)
+            .fontSize(12).fontWeight(FontWeight.Medium).width('100%')
+            .fontColor(this.overlayBannerOk ? '#0F766E' : '#DC2626')
+            .padding(10).borderRadius(8)
+            .backgroundColor(this.overlayBannerOk ? '#F0FDFA' : '#FEF2F2')
+            .border({ width: 1, color: this.overlayBannerOk ? '#99F6E4' : '#FECACA' })
+        }
 
+        Button(this.isSavingOverlay ? '融合校验保存中...' : '一键保存并启用 AI 自建分流')
+          .width('100%').height(40).fontSize(13).fontColor('#FFFFFF')
+          .backgroundColor(this.isSavingOverlay ? '#64748B' : '#0F766E').borderRadius(8)
+          .enabled(!this.isSavingOverlay)
+          .onClick(() => { this.saveOverlayConfig() })
+      }
+      .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+
+      Column({ space: 8 }) {
+        Text('🔄 双端迁移同步（Windows ↔ 鸿蒙 JSON 互通）').fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A').width('100%')
+        Text('导出 JSON 可直接导入 Windows 版桌面端；也可把 Windows 导出的 JSON 复制到剪贴板后一键导入手机。')
+          .fontSize(11).fontColor('#64748B').width('100%')
+        Row({ space: 8 }) {
+          Button('复制完整 JSON').layoutWeight(1).height(34).fontSize(12).fontColor('#2563EB')
+            .backgroundColor('#EFF6FF').borderRadius(8)
+            .onClick(() => { this.exportCrossPlatformBackup(false) })
+          Button('复制脱敏 JSON').layoutWeight(1).height(34).fontSize(12).fontColor('#334155')
+            .backgroundColor('#F1F5F9').borderRadius(8)
+            .onClick(() => { this.exportCrossPlatformBackup(true) })
+        }
+        .width('100%')
+        Button('从剪贴板导入迁移包 JSON').width('100%').height(36).fontSize(12).fontColor('#FFFFFF')
+          .backgroundColor('#2563EB').borderRadius(8)
+          .onClick(() => { this.importCrossPlatformBackupFromClipboard() })
+      }
+      .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+    }
+  }
+
+  @Builder
+  private ProfileEditorSubScreen() {
+    Column({ space: 10 }) {
+      if (this.editingProfileUid.length === 0) {
+        this.EmptyState('未选择配置', '请先在「配置列表」中导入或点击任意配置的「编辑/校验」。')
+      } else {
         Column({ space: 8 }) {
-          this.SectionTitle(`配置列表 · ${this.profileState.items.length}`, '全量更新')
-          if (this.profileState.items.length === 0) {
-            this.EmptyState('还没有配置', '先导入一个订阅 URL，后续会接入本地 YAML 和备份包。')
-          } else {
-            ForEach(this.profileState.items, (item: ClashProfile) => {
-              this.ProfileRow(item)
-            }, (item: ClashProfile) => item.uid)
+          Row() {
+            Text(`编辑：${this.editingProfileName} (当前 v${this.activeVersionNumber})`)
+              .fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A').layoutWeight(1)
+            Button('重置').height(28).fontSize(12).fontColor('#64748B')
+              .backgroundColor('#F1F5F9').borderRadius(6)
+              .onClick(() => {
+                this.editorDraftText = this.editorBaseText;
+                this.editorValidationChecked = false;
+                this.editorSaveBanner = '';
+                this.showDiffPanel = false;
+              })
+          }
+          .width('100%')
+
+          if (this.tsPrefs.managedByApp && this.tsPrefs.enabled) {
+            Text('提示：自建节点与 AI 规则建议维护在「自建与AI」页，Tailscale 由「Tailscale」页托管，更新订阅互不覆盖。')
+              .fontSize(11).fontColor('#0F766E').width('100%')
+              .padding(8).backgroundColor('#F0FDFA').borderRadius(6)
+          }
+
+          TextArea({ text: this.editorDraftText, placeholder: 'YAML 配置内容...' })
+            .width('100%')
+            .height(340)
+            .fontSize(12)
+            .fontColor('#0F172A')
+            .backgroundColor('#F8FAFC')
+            .borderRadius(8)
+            .border({ width: 1, color: '#CBD5E1' })
+            .onChange((val: string) => {
+              this.editorDraftText = val;
+              this.editorValidationChecked = false;
+              this.editorSaveBanner = '';
+            })
+
+          TextInput({ text: this.editorCommitNote, placeholder: '本次修改备注（可选，例如：新增内网规则）' })
+            .height(38).fontSize(13).backgroundColor('#F8FAFC').borderRadius(8)
+            .onChange((val: string) => { this.editorCommitNote = val })
+
+          Row({ space: 8 }) {
+            Button('融合校验').layoutWeight(1).height(36).fontSize(13).fontColor('#2563EB')
+              .backgroundColor('#EFF6FF').borderRadius(8)
+              .onClick(() => { this.runKernelValidateDraft() })
+            Button('预览 Diff').layoutWeight(1).height(36).fontSize(13).fontColor('#334155')
+              .backgroundColor('#EEF2F7').borderRadius(8)
+              .onClick(() => { this.previewDraftDiff() })
+            Button(this.isSavingDraft ? '保存中...' : '保存新版本').layoutWeight(1).height(36).fontSize(13).fontColor('#FFFFFF')
+              .backgroundColor(this.isSavingDraft ? '#64748B' : '#0F766E').borderRadius(8)
+              .enabled(!this.isSavingDraft)
+              .onClick(() => { this.saveDraftAsNewVersion() })
+          }
+          .width('100%')
+
+          if (this.editorSaveBanner.length > 0) {
+            Text(this.editorSaveBannerOk ? `✅ ${this.editorSaveBanner}` : `⚠ ${this.editorSaveBanner}`)
+              .fontSize(12).fontWeight(FontWeight.Bold).width('100%')
+              .fontColor(this.editorSaveBannerOk ? '#0F766E' : '#D97706')
+              .padding(10).borderRadius(8)
+              .backgroundColor(this.editorSaveBannerOk ? '#ECFDF5' : '#FFFBEB')
+              .border({ width: 1, color: this.editorSaveBannerOk ? '#A7F3D0' : '#FDE68A' })
+          }
+
+          if (this.editorValidationChecked) {
+            Column({ space: 4 }) {
+              Text(this.editorValidationOk ? `✅ ${this.editorValidationMessage}` : `❌ ${this.editorValidationMessage}`)
+                .fontSize(12).fontWeight(FontWeight.Bold)
+                .fontColor(this.editorValidationOk ? '#0F766E' : '#DC2626')
+                .width('100%')
+              if (this.editorValidationStats.length > 0) {
+                Text(this.editorValidationStats).fontSize(11).fontColor('#334155').width('100%')
+              }
+              ForEach(this.editorValidationWarnings, (warn: string, idx: number) => {
+                Text(`⚠ ${warn}`).fontSize(11).fontColor('#D97706').width('100%')
+              }, (warn: string, idx: number) => `val-warn-${idx}-${warn}`)
+            }
+            .width('100%').padding(10).borderRadius(8)
+            .backgroundColor(this.editorValidationOk ? '#F0FDFA' : '#FEF2F2')
+            .border({ width: 1, color: this.editorValidationOk ? '#99F6E4' : '#FECACA' })
           }
         }
         .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
 
+        if (this.showDiffPanel) {
+          this.ProfileDiffCard()
+        }
+      }
+    }
+  }
+
+  @Builder
+  private ProfileDiffCard() {
+    Column({ space: 8 }) {
+      Row() {
+        Column({ space: 2 }) {
+          Text(this.diffTitle).fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A')
+          Text(this.diffSummaryText).fontSize(11).fontColor('#64748B')
+        }
+        .alignItems(HorizontalAlign.Start).layoutWeight(1)
+        Button(this.diffContextOnly ? '看全文' : '仅变更').height(28).fontSize(11).fontColor('#2563EB')
+          .backgroundColor('#EFF6FF').borderRadius(6)
+          .onClick(() => { this.diffContextOnly = !this.diffContextOnly })
+        Button('收起').height(28).fontSize(11).fontColor('#64748B')
+          .backgroundColor('#F1F5F9').borderRadius(6).margin({ left: 6 })
+          .onClick(() => { this.showDiffPanel = false })
+      }
+      .width('100%')
+
+      if (this.visibleDiffLines().length === 0) {
+        Text('无差异行').fontSize(12).fontColor('#64748B').width('100%').padding(8)
+      } else {
+        ForEach(this.visibleDiffLines(), (dl: DiffLine, idx: number) => {
+          Row({ space: 6 }) {
+            Text(dl.kind === 'add' ? '+' : dl.kind === 'del' ? '-' : dl.kind === 'sep' ? '·' : ' ')
+              .fontSize(11).fontWeight(FontWeight.Bold).width(12)
+              .fontColor(dl.kind === 'add' ? '#047857' : dl.kind === 'del' ? '#B91C1C' : '#94A3B8')
+            Text(dl.kind === 'sep' ? '' : `${dl.newLineNo > 0 ? dl.newLineNo : dl.oldLineNo}`)
+              .fontSize(10).fontColor('#94A3B8').width(28)
+            Text(dl.text)
+              .fontSize(11).layoutWeight(1)
+              .fontColor(dl.kind === 'add' ? '#065F46' : dl.kind === 'del' ? '#991B1B' : dl.kind === 'sep' ? '#64748B' : '#334155')
+          }
+          .width('100%').padding({ left: 6, right: 6, top: 3, bottom: 3 })
+          .backgroundColor(dl.kind === 'add' ? '#ECFDF5' : dl.kind === 'del' ? '#FEF2F2' : dl.kind === 'sep' ? '#F1F5F9' : '#FFFFFF')
+        }, (dl: DiffLine, idx: number) => `diff-${idx}-${dl.kind}-${dl.oldLineNo}-${dl.newLineNo}`)
+      }
+    }
+    .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#BFDBFE' })
+  }
+
+  @Builder
+  private ProfileFlowSubScreen() {
+    Column({ space: 12 }) {
+      if (this.editingProfileUid.length === 0) {
+        this.EmptyState('未加载配置', '请先导入或在配置列表选择一份配置。')
+      } else {
+        // 1. Route Hit Simulator
+        Column({ space: 8 }) {
+          Text('实时流量路由模拟器').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#0F172A').width('100%')
+          Row({ space: 6 }) {
+            TextInput({ text: this.simQuery, placeholder: '输入域名或 IP，如 claude.ai / 192.168.1.10' })
+              .layoutWeight(1).height(38).fontSize(13).backgroundColor('#F8FAFC').borderRadius(8)
+              .onChange((val: string) => { this.runRouteSimulation(val) })
+            Button('模拟').height(38).fontSize(13).fontColor('#FFFFFF')
+              .backgroundColor('#2563EB').borderRadius(8)
+              .onClick(() => { this.runRouteSimulation() })
+          }
+          .width('100%')
+
+          Row({ space: 6 }) {
+            Button('claude.ai').height(26).fontSize(11).fontColor('#2563EB').backgroundColor('#EFF6FF').borderRadius(12)
+              .onClick(() => { this.runRouteSimulation('claude.ai') })
+            Button('192.168.1.10').height(26).fontSize(11).fontColor('#0F766E').backgroundColor('#E6FFFB').borderRadius(12)
+              .onClick(() => { this.runRouteSimulation('192.168.1.10') })
+            Button('nas.ts.net').height(26).fontSize(11).fontColor('#0F766E').backgroundColor('#E6FFFB').borderRadius(12)
+              .onClick(() => { this.runRouteSimulation('nas.ts.net') })
+            Button('baidu.com').height(26).fontSize(11).fontColor('#475569').backgroundColor('#F1F5F9').borderRadius(12)
+              .onClick(() => { this.runRouteSimulation('www.baidu.com') })
+          }
+          .width('100%')
+
+          if (this.simResult.query.length > 0) {
+            Column({ space: 6 }) {
+              Row() {
+                Text(this.simResult.ruleIndex > 0 ? `命中规则 #${this.simResult.ruleIndex}` : '模式直判')
+                  .fontSize(12).fontWeight(FontWeight.Bold).fontColor(this.categoryAccentColor(this.simResult.category))
+                this.Pill(this.simResult.target, this.categoryAccentColor(this.simResult.category), this.categoryBgColor(this.simResult.category))
+              }
+              .width('100%').justifyContent(FlexAlign.SpaceBetween)
+              Text(`链路：${this.simResult.query}  ==>  ${this.simResult.chain.join(' -> ')}`)
+                .fontSize(12).fontWeight(FontWeight.Medium).fontColor('#0F172A').width('100%')
+              Text(`规则：${this.simResult.matchedRuleRaw}`).fontSize(11).fontColor('#475569').width('100%')
+              Text(`DNS：${this.simResult.dnsNote}`).fontSize(11).fontColor('#64748B').width('100%')
+            }
+            .width('100%').padding(10).borderRadius(8)
+            .backgroundColor(this.categoryBgColor(this.simResult.category))
+            .border({ width: 1, color: '#CBD5E1' })
+          }
+        }
+        .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+
+        // 2. Traffic Flow Buckets Overview
+        Column({ space: 8 }) {
+          Text('流量去向总览').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#0F172A').width('100%')
+          Row({ space: 6 }) {
+            this.Metric('Tailscale', `${this.trafficAnalysis.tailscaleRuleCount}`)
+            this.Metric('代理规则', `${this.trafficAnalysis.proxyRuleCount}`)
+            this.Metric('直连', `${this.trafficAnalysis.directRuleCount}`)
+            this.Metric('拦截', `${this.trafficAnalysis.rejectRuleCount}`)
+          }
+          .width('100%')
+
+          ForEach(this.trafficAnalysis.buckets, (bucket: FlowBucket) => {
+            Column({ space: 4 }) {
+              Row() {
+                Text(bucket.title).fontSize(13).fontWeight(FontWeight.Bold)
+                  .fontColor(this.categoryAccentColor(bucket.category))
+                this.Pill(`${bucket.ruleCount} 条规则`, this.categoryAccentColor(bucket.category), this.categoryBgColor(bucket.category))
+              }
+              .width('100%').justifyContent(FlexAlign.SpaceBetween)
+              Text(`出口链：${bucket.chainPreview}`).fontSize(11).fontColor('#334155').width('100%')
+              Text(bucket.sampleRules.join(' · ')).fontSize(11).fontColor('#64748B').width('100%')
+            }
+            .width('100%').padding(10).backgroundColor('#F8FAFC').borderRadius(8)
+            .border({ width: 1, color: '#E2E8F0' })
+          }, (bucket: FlowBucket) => `${bucket.id}-${bucket.ruleCount}`)
+        }
+        .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+
+        // 3. Visual Rule List + Quick Add
+        Column({ space: 8 }) {
+          Row() {
+            Text(`规则优先级链 · ${this.trafficAnalysis.rules.length}`).fontSize(15).fontWeight(FontWeight.Bold).fontColor('#0F172A')
+            Button(this.showAddRulePanel ? '收起' : '+ 新增规则').height(30).fontSize(12).fontColor('#FFFFFF')
+              .backgroundColor('#0F766E').borderRadius(8)
+              .onClick(() => { this.showAddRulePanel = !this.showAddRulePanel })
+          }
+          .width('100%').justifyContent(FlexAlign.SpaceBetween)
+
+          if (this.showAddRulePanel) {
+            Column({ space: 8 }) {
+              Row({ space: 6 }) {
+                Button('域名后缀').layoutWeight(1).height(28).fontSize(11)
+                  .fontColor(this.newRuleType === 'DOMAIN-SUFFIX' ? '#FFFFFF' : '#334155')
+                  .backgroundColor(this.newRuleType === 'DOMAIN-SUFFIX' ? '#0F766E' : '#F1F5F9').borderRadius(6)
+                  .onClick(() => { this.newRuleType = 'DOMAIN-SUFFIX' })
+                Button('精确域名').layoutWeight(1).height(28).fontSize(11)
+                  .fontColor(this.newRuleType === 'DOMAIN' ? '#FFFFFF' : '#334155')
+                  .backgroundColor(this.newRuleType === 'DOMAIN' ? '#0F766E' : '#F1F5F9').borderRadius(6)
+                  .onClick(() => { this.newRuleType = 'DOMAIN' })
+                Button('关键词').layoutWeight(1).height(28).fontSize(11)
+                  .fontColor(this.newRuleType === 'DOMAIN-KEYWORD' ? '#FFFFFF' : '#334155')
+                  .backgroundColor(this.newRuleType === 'DOMAIN-KEYWORD' ? '#0F766E' : '#F1F5F9').borderRadius(6)
+                  .onClick(() => { this.newRuleType = 'DOMAIN-KEYWORD' })
+                Button('IP-CIDR').layoutWeight(1).height(28).fontSize(11)
+                  .fontColor(this.newRuleType === 'IP-CIDR' ? '#FFFFFF' : '#334155')
+                  .backgroundColor(this.newRuleType === 'IP-CIDR' ? '#0F766E' : '#F1F5F9').borderRadius(6)
+                  .onClick(() => { this.newRuleType = 'IP-CIDR' })
+              }
+              .width('100%')
+
+              TextInput({ text: this.newRulePayload, placeholder: '匹配内容，如 example.com 或 192.168.10.0/24' })
+                .height(38).fontSize(13).backgroundColor('#FFFFFF').borderRadius(8)
+                .onChange((val: string) => { this.newRulePayload = val })
+
+              Text('目标出口：').fontSize(12).fontColor('#475569').width('100%')
+              Flex({ wrap: FlexWrap.Wrap }) {
+                ForEach(this.trafficAnalysis.availableTargets, (tgt: string) => {
+                  Text(tgt).fontSize(11)
+                    .fontColor(this.newRuleTarget === tgt ? '#FFFFFF' : '#334155')
+                    .backgroundColor(this.newRuleTarget === tgt ? '#2563EB' : '#FFFFFF')
+                    .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+                    .margin({ right: 6, bottom: 6 })
+                    .borderRadius(12)
+                    .border({ width: 1, color: this.newRuleTarget === tgt ? '#2563EB' : '#CBD5E1' })
+                    .onClick(() => { this.newRuleTarget = tgt })
+                }, (tgt: string) => `tgt-${tgt}`)
+              }
+
+              Row({ space: 8 }) {
+                Button(this.newRulePrepend ? '插入位置：最顶部优先' : '插入位置：MATCH 之前')
+                  .layoutWeight(1).height(32).fontSize(11).fontColor('#334155')
+                  .backgroundColor('#E2E8F0').borderRadius(6)
+                  .onClick(() => { this.newRulePrepend = !this.newRulePrepend })
+                Button('确认添加并存新版本').height(32).fontSize(12).fontColor('#FFFFFF')
+                  .backgroundColor('#0F766E').borderRadius(6)
+                  .onClick(() => { this.submitNewRule() })
+              }
+              .width('100%')
+            }
+            .padding(10).backgroundColor('#F0FDFA').borderRadius(8).border({ width: 1, color: '#99F6E4' })
+          }
+
+          TextInput({ text: this.ruleSearchText, placeholder: '搜索规则域名、网段或策略组...' })
+            .height(36).fontSize(12).backgroundColor('#F8FAFC').borderRadius(8)
+            .onChange((val: string) => { this.ruleSearchText = val })
+
+          ForEach(this.getFilteredRules(), (rule: ParsedRuleItem) => {
+            Row({ space: 6 }) {
+              Text(`#${rule.index}`).fontSize(11).fontColor('#94A3B8').width(28)
+              Column({ space: 2 }) {
+                Text(`${rule.ruleType}${rule.payload.length > 0 ? ` · ${rule.payload}` : ''}`)
+                  .fontSize(12).fontWeight(FontWeight.Medium).fontColor('#0F172A')
+                Text(`-> ${rule.chainLabel}`).fontSize(11).fontColor(this.categoryAccentColor(rule.category))
+              }
+              .alignItems(HorizontalAlign.Start).layoutWeight(1)
+              Button('↑').width(28).height(26).fontSize(11).fontColor('#334155').backgroundColor('#F1F5F9').borderRadius(6)
+                .onClick(() => { this.moveVisualRule(rule.index, -1) })
+              Button('↓').width(28).height(26).fontSize(11).fontColor('#334155').backgroundColor('#F1F5F9').borderRadius(6)
+                .onClick(() => { this.moveVisualRule(rule.index, 1) })
+              Button('删').width(32).height(26).fontSize(11).fontColor('#DC2626').backgroundColor('#FEF2F2').borderRadius(6)
+                .onClick(() => { this.deleteVisualRule(rule) })
+            }
+            .width('100%').padding(8).backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#E2E8F0' })
+          }, (rule: ParsedRuleItem) => `rule-${rule.index}-${rule.raw}`)
+        }
+        .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+      }
+    }
+  }
+
+  // ============== TailscaleScreen (Embedded Native Management) ==============
+  @Builder
+  private TailscaleScreen() {
+    Scroll() {
+      Column({ space: 12 }) {
+        // 1. Hero Status & Account Card
         Column({ space: 10 }) {
-          this.SectionTitle('配置摘要', '')
+          Row() {
+            Row({ space: 8 }) {
+              Text('Tailscale 组网').fontSize(16).fontWeight(FontWeight.Bold).fontColor('#0F172A')
+              this.Pill(this.tailscaleStateLabel(), this.tailscaleStateColor(), this.tailscaleStateBgColor())
+            }
+            Button('刷新').height(30).fontSize(12).fontColor('#2563EB')
+              .backgroundColor('#EFF6FF').borderRadius(8)
+              .onClick(() => { this.refreshTailscaleStatus() })
+          }
+          .width('100%').justifyContent(FlexAlign.SpaceBetween)
+
+          if (this.tsControl.tailnetName.length > 0) {
+            this.InfoRow('Tailnet', this.tsControl.tailnetName)
+          }
+          if (this.tsControl.loginName.length > 0) {
+            this.InfoRow('登录账号', this.tsControl.loginName)
+          }
+          this.InfoRow('本机节点', this.tailscaleHostname.length > 0 ? this.tailscaleHostname : this.tsPrefs.hostname)
+          if (this.tailscaleIps.length > 0) {
+            Row() {
+              Text('Tailscale IP').fontSize(13).fontColor('#64748B')
+              Text(this.tailscaleIps).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F766E')
+                .onClick(() => { this.copyPlainText('Tailscale IP', this.tailscaleIps) })
+            }
+            .width('100%').justifyContent(FlexAlign.SpaceBetween)
+          }
+
+          if (this.tailscaleAuthUrl.length > 0) {
+            Column({ space: 8 }) {
+              Row() {
+                Text('需要浏览器授权登录').fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F766E')
+                Button('复制登录链接').height(28).fontSize(12).fontColor('#FFFFFF')
+                  .backgroundColor('#0F766E').borderRadius(6)
+                  .onClick(() => { this.copyTailscaleAuthUrl() })
+              }
+              .width('100%').justifyContent(FlexAlign.SpaceBetween)
+              Text(this.tailscaleAuthUrl).fontSize(12).fontColor('#115E59').width('100%')
+                .copyOption(CopyOptions.LocalDevice)
+            }
+            .padding(10).backgroundColor('#F0FDFA').borderRadius(8).border({ width: 1, color: '#99F6E4' })
+          }
+
           Row({ space: 8 }) {
-            this.Metric('订阅', `${this.profileState.items.length}`)
-            this.Metric('节点', `${this.proxyNodes.length}`)
-            this.Metric('运行配置', this.liveRuntimeConfigState)
+            Button('获取登录链接').layoutWeight(1).height(34).fontSize(12).fontColor('#FFFFFF')
+              .backgroundColor('#0F766E').borderRadius(8)
+              .onClick(() => { this.triggerTailscaleLogin() })
+            Button('登出切换账号').layoutWeight(1).height(34).fontSize(12).fontColor('#DC2626')
+              .backgroundColor('#FEF2F2').borderRadius(8)
+              .onClick(() => { this.triggerTailscaleLogout() })
+          }
+          .width('100%')
+
+          if (this.tsBusyMessage.length > 0) {
+            Text(this.tsBusyMessage).fontSize(12).fontColor('#2563EB').width('100%')
+          }
+          if (this.tailscaleError.length > 0) {
+            Text(`错误：${this.tailscaleError}`).fontSize(12).fontColor('#DC2626').width('100%')
+          }
+        }
+        .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+
+        // 2. Decoupled Native Tailscale Preferences
+        Column({ space: 8 }) {
+          Text('Tailscale 原生配置（与 Mihomo YAML 解耦）').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#0F172A').width('100%')
+
+          Column() {
+            this.SwitchRow('App 接管 Tailscale 配置', '自动注入 Tailscale 出站，Mihomo YAML 仅需配置分流规则', this.tsPrefs.managedByApp)
+          }.onClick(() => { this.toggleTsManagedByApp() })
+
+          Column() {
+            this.SwitchRow('启用 Tailscale 出站', '开启后与 Mihomo 代理共享同一系统 VPN', this.tsPrefs.enabled)
+          }.onClick(() => { this.toggleTsEnabled() })
+
+          Column() {
+            this.SwitchRow('接受子网路由 (Accept Routes)', '访问对端广播的内网段（支持运行中热生效）', this.tsPrefs.acceptRoutes)
+          }.onClick(() => { this.toggleTsAcceptRoutes() })
+
+          Column() {
+            this.SwitchRow('自动注入 MagicDNS 与放行', '自动合并 *.ts.net DNS 策略及 fake-ip-filter', this.tsPrefs.autoInjectMagicDns)
+          }.onClick(() => { this.toggleTsAutoInjectDns() })
+
+          Column() {
+            this.SwitchRow('自动同步 SplitDNS 域名', '自动将后台 SplitDNS（如 sjfarm.cc）写入 DNS 策略、fake-ip 放行与分流规则，并保护直连子域名', this.tsPrefs.autoSyncSplitDns)
+          }.onClick(() => { this.toggleTsAutoSyncSplitDns() })
+
+          Column() {
+            this.SwitchRow('Exit Node 允许局域网访问', '使用 Exit Node 时保留本地局域网直连（热生效）', this.tsPrefs.exitNodeAllowLan)
+          }.onClick(() => { this.toggleTsExitNodeAllowLan() })
+
+          TextInput({ text: this.tsHostnameDraft, placeholder: '本机设备名 Hostname（默认 harmony-phone）' })
+            .height(38).fontSize(13).backgroundColor('#F8FAFC').borderRadius(8)
+            .onChange((val: string) => { this.tsHostnameDraft = val })
+
+          TextInput({ text: this.tsControlUrlDraft, placeholder: '自定义 Control URL（留空为官方，可填 Headscale）' })
+            .height(38).fontSize(13).backgroundColor('#F8FAFC').borderRadius(8)
+            .onChange((val: string) => { this.tsControlUrlDraft = val })
+
+          TextInput({ text: this.tsAuthKeyDraft, placeholder: '可选 Auth Key（留空则走交互式浏览器登录）' })
+            .height(38).fontSize(13).backgroundColor('#F8FAFC').borderRadius(8)
+            .onChange((val: string) => { this.tsAuthKeyDraft = val })
+
+          Button('保存并应用 Tailscale 设置').width('100%').height(38).fontSize(13).fontColor('#FFFFFF')
+            .backgroundColor('#0F766E').borderRadius(8)
+            .onClick(() => { this.saveTsTextSettings() })
+        }
+        .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+
+        // 3. Exit Node Selector + Mihomo Linkage
+        Column({ space: 8 }) {
+          Row() {
+            Text('出口节点 (Exit Node)').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#0F172A')
+            this.Pill(this.tsPrefs.exitNode.length > 0 ? this.tsPrefs.exitNode : '未启用',
+              this.tsPrefs.exitNode.length > 0 ? '#0F766E' : '#64748B',
+              this.tsPrefs.exitNode.length > 0 ? '#E6FFFB' : '#F1F5F9')
+          }
+          .width('100%').justifyContent(FlexAlign.SpaceBetween)
+
+          Row({ space: 8 }) {
+            Button('关闭 Exit Node').layoutWeight(1).height(32).fontSize(12).fontColor('#475569')
+              .backgroundColor('#F1F5F9').borderRadius(6)
+              .onClick(() => { this.selectTsExitNode('') })
+            Button('将全部代理切至 Tailscale').layoutWeight(1).height(32).fontSize(12).fontColor('#2563EB')
+              .backgroundColor('#EFF6FF').borderRadius(6)
+              .onClick(() => { this.routeProxyViaTailscaleExitNode() })
+          }
+          .width('100%')
+
+          if (this.getExitNodeCandidates().length === 0) {
+            Text(this.tsControl.reachable ? '当前 Tailnet 暂无可用 Exit Node 节点' : '连接 VPN 后自动读取 Tailnet 可用 Exit Node')
+              .fontSize(12).fontColor('#64748B').width('100%')
+          } else {
+            ForEach(this.getExitNodeCandidates(), (peer: TailscalePeerItem) => {
+              Row() {
+                Column({ space: 2 }) {
+                  Text(peer.hostName).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F172A')
+                  Text(`${peer.tailscaleIPs.length > 0 ? peer.tailscaleIPs[0] : ''} · ${peer.online ? '在线' : '离线'}`)
+                    .fontSize(11).fontColor('#64748B')
+                }
+                .alignItems(HorizontalAlign.Start).layoutWeight(1)
+                Button(peer.exitNode ? '当前出口' : '选用').height(28).fontSize(12)
+                  .fontColor(peer.exitNode ? '#FFFFFF' : '#0F766E')
+                  .backgroundColor(peer.exitNode ? '#0F766E' : '#E6FFFB').borderRadius(6)
+                  .onClick(() => {
+                    if (peer.tailscaleIPs.length > 0) {
+                      this.selectTsExitNode(peer.tailscaleIPs[0]);
+                    }
+                  })
+              }
+              .width('100%').padding(8).backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#E2E8F0' })
+            }, (peer: TailscalePeerItem) => `exit-${peer.id}-${peer.exitNode ? '1' : '0'}`)
+          }
+        }
+        .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+
+        // 4. Discovered Subnet Routes, MagicDNS & SplitDNS -> One-click Sync to Mihomo Rules
+        if (this.tsControl.advertisedRoutes.length > 0 || this.tsControl.magicDnsSuffix.length > 0 ||
+          this.tsControl.splitDns.length > 0 || this.tsPrefs.splitDnsDomains.length > 0) {
+          Column({ space: 8 }) {
+            Text('已发现子网、MagicDNS 与 SplitDNS（自动联动 Mihomo）').fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A').width('100%')
+            if (this.tsSplitDnsNeedReload) {
+              Row({ space: 8 }) {
+                Text('已同步最新 SplitDNS 域名到本地配置，请重连 VPN 使 DNS 策略生效。')
+                  .fontSize(12).fontColor('#B45309').layoutWeight(1)
+              }
+              .width('100%').padding(8).backgroundColor('#FFFBEB').borderRadius(8).border({ width: 1, color: '#FDE68A' })
+            }
+            if (this.tsControl.splitDns.length > 0) {
+              ForEach(this.tsControl.splitDns, (sd: TailscaleSplitDnsItem) => {
+                Row() {
+                  Column({ space: 2 }) {
+                    Text(`*.${sd.domain}`).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F172A')
+                    Text(`SplitDNS · 上游 ${sd.nameservers.length > 0 ? sd.nameservers.join(', ') : 'Tailscale 内置'}`)
+                      .fontSize(11).fontColor('#0F766E')
+                  }
+                  .alignItems(HorizontalAlign.Start).layoutWeight(1)
+                  Button('+ 写入配置').height(28).fontSize(11).fontColor('#0F766E')
+                    .backgroundColor('#E6FFFB').borderRadius(6)
+                    .onClick(() => { this.addSplitDnsToMihomoProfile(sd.domain) })
+                }
+                .width('100%').padding(8).backgroundColor('#F0FDFA').borderRadius(8).border({ width: 1, color: '#99F6E4' })
+              }, (sd: TailscaleSplitDnsItem) => `split-${sd.domain}`)
+            } else if (this.tsPrefs.splitDnsDomains.length > 0) {
+              Text(`已缓存 SplitDNS：${this.tsPrefs.splitDnsDomains.join(', ')}（启动 VPN 时自动注入）`)
+                .fontSize(12).fontColor('#0F766E').width('100%')
+            }
+            if (this.tsControl.magicDnsSuffix.length > 0) {
+              Row() {
+                Column({ space: 2 }) {
+                  Text(`*.${this.tsControl.magicDnsSuffix}`).fontSize(13).fontWeight(FontWeight.Medium).fontColor('#0F172A')
+                  Text('Tailnet MagicDNS 后缀').fontSize(11).fontColor('#64748B')
+                }
+                .alignItems(HorizontalAlign.Start).layoutWeight(1)
+                Button('+ 加分流规则').height(28).fontSize(11).fontColor('#0F766E')
+                  .backgroundColor('#E6FFFB').borderRadius(6)
+                  .onClick(() => { this.addTailnetSuffixToMihomoRules(this.tsControl.magicDnsSuffix) })
+              }
+              .width('100%').padding(8).backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#E2E8F0' })
+            }
+            ForEach(this.tsControl.advertisedRoutes, (rt: TailscaleAdvertisedRouteItem) => {
+              Row() {
+                Column({ space: 2 }) {
+                  Text(rt.cidr).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F172A')
+                  Text(`由 ${rt.peerName} (${rt.peerIp}) 广播 · ${rt.online ? '在线' : '离线'}`).fontSize(11).fontColor('#64748B')
+                }
+                .alignItems(HorizontalAlign.Start).layoutWeight(1)
+                Button('+ 加分流规则').height(28).fontSize(11).fontColor('#0F766E')
+                  .backgroundColor('#E6FFFB').borderRadius(6)
+                  .onClick(() => { this.addDiscoveredRouteToMihomoRules(rt.cidr) })
+              }
+              .width('100%').padding(8).backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#E2E8F0' })
+            }, (rt: TailscaleAdvertisedRouteItem) => `adv-${rt.cidr}-${rt.peerName}`)
+
+            Row({ space: 8 }) {
+              TextInput({ text: this.tsDnsTestQuery, placeholder: 'SplitDNS 诊断域名（如 dsh-10.sjfarm.cc）' })
+                .layoutWeight(1).height(34).fontSize(12).backgroundColor('#F8FAFC').borderRadius(6)
+                .onChange((val: string) => { this.tsDnsTestQuery = val })
+              Button('测试解析').height(34).fontSize(12).fontColor('#FFFFFF')
+                .backgroundColor('#2563EB').borderRadius(6)
+                .onClick(() => { this.runTailscaleDnsTest() })
+            }
+            .width('100%')
+            if (this.tsDnsTestResult.length > 0) {
+              Text(this.tsDnsTestResult).fontSize(12).fontColor('#0F766E').width('100%')
+            }
+          }
+          .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+        }
+
+        // 5. Native Peers List with Live Ping
+        Column({ space: 8 }) {
+          Row() {
+            Text(`设备列表 · ${this.tsControl.peers.length}`).fontSize(15).fontWeight(FontWeight.Bold).fontColor('#0F172A')
+            Text(`${this.tsPingRefreshTick}`).width(1).height(1).opacity(0)
+            Button(this.isBatchPingingPeers ? 'Ping 测速中...' : '⚡ 一键 Ping 全部')
+              .height(30).fontSize(12).fontColor('#FFFFFF')
+              .backgroundColor(this.isBatchPingingPeers ? '#64748B' : '#0F766E').borderRadius(8)
+              .enabled(!this.isBatchPingingPeers)
+              .onClick(() => { this.pingAllOnlineTailscalePeers() })
+          }
+          .width('100%').justifyContent(FlexAlign.SpaceBetween)
+
+          if (this.batchPingProgress.length > 0) {
+            Text(this.batchPingProgress).fontSize(12).fontColor('#0F766E').width('100%')
+              .padding({ left: 8, right: 8, top: 6, bottom: 6 }).backgroundColor('#F0FDFA').borderRadius(6)
+          }
+
+          if (this.tsControl.peers.length === 0) {
+            this.EmptyState(
+              this.tsControl.reachable ? '暂无对端设备' : 'Tailscale 核心未运行',
+              this.tsControl.reachable ? '完成授权登录后将显示 Tailnet 内所有在线与离线设备。' : '请在首页点击「连接」启动 VPN 后查看设备列表与测速。'
+            )
+          } else {
+            ForEach(this.tsControl.peers, (peer: TailscalePeerItem) => {
+              Column({ space: 6 }) {
+                Row({ space: 8 }) {
+                  Column().width(8).height(8).borderRadius(4).backgroundColor(peer.online ? '#10B981' : '#CBD5E1')
+                  Column({ space: 2 }) {
+                    Text(`${peer.hostName}${peer.os.length > 0 ? ` · ${peer.os}` : ''}`)
+                      .fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A')
+                    Text(peer.tailscaleIPs.length > 0 ? peer.tailscaleIPs[0] : peer.dnsName)
+                      .fontSize(12).fontColor('#0F766E')
+                      .onClick(() => {
+                        if (peer.tailscaleIPs.length > 0) {
+                          this.copyPlainText('设备 IP', peer.tailscaleIPs[0]);
+                        }
+                      })
+                  }
+                  .alignItems(HorizontalAlign.Start).layoutWeight(1)
+                  Button('Ping').height(28).fontSize(11).fontColor('#2563EB')
+                    .backgroundColor('#EFF6FF').borderRadius(6)
+                    .onClick(() => { this.pingTailscalePeer(peer) })
+                }
+                .width('100%')
+
+                Row() {
+                  Text(peer.curAddr.length > 0 ? `直连 ${peer.curAddr}` : peer.relay.length > 0 ? `DERP 中继 (${peer.relay})` : '待建连')
+                    .fontSize(11).fontColor('#64748B').layoutWeight(1)
+                  Text(`↓${this.formatBytes(peer.rxBytes)} / ↑${this.formatBytes(peer.txBytes)}`)
+                    .fontSize(11).fontColor('#64748B')
+                }
+                .width('100%')
+
+                if (peer.primaryRoutes.length > 0) {
+                  Text(`子网路由：${peer.primaryRoutes.join(', ')}`).fontSize(11).fontColor('#0F766E').width('100%')
+                }
+                if (this.getPeerPingText(peer.id).length > 0) {
+                  Text(`Ping 结果：${this.getPeerPingText(peer.id)}`).fontSize(11).fontWeight(FontWeight.Medium).fontColor('#2563EB').width('100%')
+                }
+              }
+              .width('100%').padding(10).backgroundColor('#F8FAFC').borderRadius(8)
+              .border({ width: 1, color: peer.online ? '#A7F3D0' : '#E2E8F0' })
+            }, (peer: TailscalePeerItem) => `peer-${peer.id}-${peer.online ? 'on' : 'off'}-${this.tsPingRefreshTick}`)
           }
         }
         .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
@@ -2513,7 +4689,14 @@ struct Index {
           Text('Tailscale 状态').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#0F172A')
           this.Pill(this.tailscaleStateLabel(), this.tailscaleStateColor(), this.tailscaleStateBgColor())
         }
-        if (!compact) {
+        if (compact) {
+          Button('管理').height(28).fontSize(12).fontColor('#0F766E')
+            .backgroundColor('#E6FFFB').borderRadius(6)
+            .onClick(() => {
+              this.currentTab = 'tailscale';
+              this.refreshTailscaleStatus();
+            })
+        } else {
           Button('刷新').height(28).fontSize(12).fontColor('#2563EB')
             .backgroundColor('#EFF6FF').borderRadius(6)
             .onClick(() => { this.refreshCoreLogs() })
@@ -3140,9 +5323,14 @@ struct Index {
   private getSubtitle(): string {
     if (this.showSettings) { return 'VPN · DNS · 核心' }
     if (this.currentTab === 'proxies') {
-      return this.profileState.currentUid.length > 0 ? '节点列表 · 等待核心同步' : '请先导入配置'
+      return this.profileState.currentUid.length > 0 ? '节点列表 · 策略组切换与测速' : '请先导入配置'
     }
-    if (this.currentTab === 'profiles') { return `${this.profileState.items.length} 个配置` }
+    if (this.currentTab === 'tailscale') {
+      return this.tsControl.tailnetName.length > 0
+        ? `${this.tsControl.tailnetName} · ${this.tsControl.peers.length} 设备`
+        : '内嵌 Tailscale 原生管理'
+    }
+    if (this.currentTab === 'profiles') { return `${this.profileState.items.length} 个配置 · 版本管理与流量规则` }
     if (this.currentTab === 'diagnostics') {
       return this.controllerStatus.available ? `controller ${this.controllerStatus.version}` : '诊断与运行配置'
     }

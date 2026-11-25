@@ -132,6 +132,10 @@ func (t tunnel) RuleUpdateCallback() *utils.Callback[P.RuleProvider] {
 	return ruleUpdateCallback
 }
 
+func (t tunnel) ResolveProxy(metadata *C.Metadata) (C.Proxy, C.Rule, error) {
+	return resolveMetadata(metadata)
+}
+
 func OnSuspend() {
 	status.Store(Suspend)
 }

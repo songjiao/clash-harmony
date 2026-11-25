@@ -26,4 +26,6 @@ app/local.properties
 *.hsp
 *.har
 *.log
+*.exe
+desktop/dist/
 .DS_Store
