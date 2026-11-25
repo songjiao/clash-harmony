@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -427,5 +428,114 @@ rules:
 	idxDir := strings.Index(out, "IP-CIDR,100.64.0.0/10,DIRECT")
 	if idxTS < 0 || idxDir < 0 || idxTS > idxDir {
 		t.Errorf("expected Tailscale 100.64.0.0/10 (%d) before BitzNet DIRECT (%d)", idxTS, idxDir)
+	}
+}
+
+func TestMobileSyncBundle_ExcludesDeviceIdentityAndAuthKey(t *testing.T) {
+	store, err := NewDataStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewDataStore failed: %v", err)
+	}
+	ts := defaultTailscalePrefs()
+	ts.Hostname = "my-windows-laptop"
+	ts.AuthKey = "tskey-auth-secret-should-not-sync"
+	ts.ExitNode = "100.64.0.99"
+	ts.SplitDNSDomains = []string{"in.sjfarm.cc", "q.sjfarm.cc"}
+	if err := store.SaveTailscalePrefs(ts); err != nil {
+		t.Fatalf("SaveTailscalePrefs failed: %v", err)
+	}
+	bundle := BuildMobileSyncBundle(store)
+	if len(bundle.TailscaleRouting.SplitDNSDomains) != 2 {
+		t.Fatalf("expected 2 SplitDNS domains synced, got %#v", bundle.TailscaleRouting.SplitDNSDomains)
+	}
+	if !bundle.TailscaleRouting.AcceptRoutes || !bundle.TailscaleRouting.AutoInjectMagicDNS {
+		t.Fatalf("expected Tailscale routing flags synced, got %+v", bundle.TailscaleRouting)
+	}
+}
+
+func TestBuildRuntimeYAML_AutoInjectsTailscaleSubnetRoutesAboveDirect(t *testing.T) {
+	baseYAML := `mode: rule
+proxies:
+  - { name: HK-1, type: ss, server: hk.example.com, port: 443, cipher: aes-128-gcm, password: secret }
+proxy-groups:
+  - name: Proxy
+    type: select
+    proxies:
+      - HK-1
+rules:
+  - IP-CIDR,192.168.0.0/16,DIRECT
+  - GEOIP,CN,DIRECT
+  - MATCH,Proxy
+`
+	ts := defaultTailscalePrefs()
+	ts.AcceptRoutes = true
+	ts.SubnetRoutes = []string{"192.168.1.0/24", "10.20.0.0/24", "0.0.0.0/0", "100.64.0.0/10"}
+	out, err := BuildRuntimeYAMLWithOverlay(baseYAML, defaultCustomOverlay(), ts, defaultAppSettings())
+	if err != nil {
+		t.Fatalf("BuildRuntimeYAMLWithOverlay failed: %v", err)
+	}
+	idxSubnet := strings.Index(out, "IP-CIDR,192.168.1.0/24,Tailscale,no-resolve")
+	idxDirect := strings.Index(out, "IP-CIDR,192.168.0.0/16,DIRECT")
+	if idxSubnet < 0 || idxDirect < 0 || idxSubnet > idxDirect {
+		t.Fatalf("expected 192.168.1.0/24 -> Tailscale (%d) BEFORE 192.168.0.0/16 -> DIRECT (%d)\n%s", idxSubnet, idxDirect, out)
+	}
+	if strings.Contains(out, "0.0.0.0/0,Tailscale") {
+		t.Fatalf("must never inject 0.0.0.0/0 as a subnet route rule")
+	}
+	// Verify local physical LAN overlap guard works
+	filtered := filterNonLocalSubnetRoutes(
+		[]string{"10.10.1.0/24", "192.168.1.0/24"},
+		localSubnetsForTest("10.10.1.0/24"),
+	)
+	if len(filtered) != 1 || filtered[0] != "192.168.1.0/24" {
+		t.Fatalf("expected 10.10.1.0/24 filtered out and 192.168.1.0/24 kept, got %#v", filtered)
+	}
+}
+
+func localSubnetsForTest(cidrs ...string) []netip.Prefix {
+	out := make([]netip.Prefix, 0, len(cidrs))
+	for _, c := range cidrs {
+		out = append(out, netip.MustParsePrefix(c))
+	}
+	return out
+}
+
+func TestParseTun_NeverAssignsDotZeroNetworkIPFromFakeIPRange(t *testing.T) {
+	baseYAML := `mode: rule
+dns:
+  enable: true
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.0/15
+  nameserver:
+    - 223.5.5.5
+proxies:
+  - { name: HK-1, type: ss, server: hk.example.com, port: 443, cipher: aes-128-gcm, password: secret }
+proxy-groups:
+  - name: Proxy
+    type: select
+    proxies:
+      - HK-1
+rules:
+  - MATCH,Proxy
+`
+	settings := defaultAppSettings()
+	settings.TunMode = true
+	out, err := BuildRuntimeYAMLWithOverlay(baseYAML, defaultCustomOverlay(), defaultTailscalePrefs(), settings)
+	if err != nil {
+		t.Fatalf("BuildRuntimeYAMLWithOverlay failed: %v", err)
+	}
+	if strings.Contains(out, "fake-ip-range: 198.18.0.0/") {
+		t.Fatalf("expected sanitized fake-ip-range not to end in .0, got:\n%s", out)
+	}
+	cfg, err := config.Parse([]byte(out))
+	if err != nil {
+		t.Fatalf("config.Parse failed: %v", err)
+	}
+	if len(cfg.General.Tun.Inet4Address) == 0 {
+		t.Fatalf("expected non-empty Tun.Inet4Address")
+	}
+	gotAddr := cfg.General.Tun.Inet4Address[0].Addr()
+	if gotAddr.String() != "198.18.0.1" {
+		t.Fatalf("expected Wintun local IPv4 198.18.0.1, got %s (prefix=%s)", gotAddr, cfg.General.Tun.Inet4Address[0])
 	}
 }

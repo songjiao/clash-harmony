@@ -1,6 +1,7 @@
 import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 import { fileIo } from '@kit.CoreFileKit';
+import { http } from '@kit.NetworkKit';
 import { ClashProfile, createLocalProfile, createRemoteProfile, ProfileState } from '../models/Profile';
 import { ProfileStore } from './ProfileStore';
 import { TailscaleNativePrefs, TailscalePrefsService } from './TailscalePrefsService';
@@ -36,6 +37,8 @@ export interface BackupImportResult {
   ok: boolean;
   message: string;
   importedProfiles: number;
+  importedProfileUid: string;
+  activated: boolean;
 }
 
 export const DEFAULT_AI_GROUP_NAME: string = '🛡️ AI严格自建';
@@ -877,45 +880,132 @@ export class OverlayService {
   }
 
   /**
+   * Fetches and imports a cross-device sync bundle from a QR code scanned from Windows Desktop.
+   * Supports `clashharmony://sync?url=...`, direct `http://<lan-ip>:<port>/sync?token=...`, or raw JSON.
+   */
+  static async importFromQrSyncText(context: common.Context, rawQrValue: string): Promise<BackupImportResult> {
+    const trimmed: string = rawQrValue.trim();
+    if (trimmed.length === 0) {
+      return { ok: false, message: '未扫描到有效二维码内容', importedProfiles: 0, importedProfileUid: '', activated: false };
+    }
+    if (trimmed.startsWith('{')) {
+      return await OverlayService.importBackupBundleJson(context, trimmed);
+    }
+
+    let syncUrl: string = '';
+    if (trimmed.toLowerCase().startsWith('clashharmony://sync')) {
+      const qIdx: number = trimmed.indexOf('?');
+      if (qIdx >= 0) {
+        const params: Record<string, string> = OverlayService.parseQueryParams(trimmed.substring(qIdx + 1));
+        syncUrl = params['url'] ? params['url'].trim() : '';
+      }
+    } else if (trimmed.toLowerCase().startsWith('http://') || trimmed.toLowerCase().startsWith('https://')) {
+      syncUrl = trimmed;
+    }
+
+    if (syncUrl.length === 0) {
+      return {
+        ok: false,
+        message: '二维码不是 Clash Harmony 同步码（请在电脑端点击「📱 扫码同步到手机」生成）',
+        importedProfiles: 0,
+        importedProfileUid: '',
+        activated: false
+      };
+    }
+
+    const request: http.HttpRequest = http.createHttp();
+    try {
+      const response: http.HttpResponse = await request.request(syncUrl, {
+        method: http.RequestMethod.GET,
+        expectDataType: http.HttpDataType.STRING,
+        connectTimeout: 8000,
+        readTimeout: 12000,
+        usingCache: false
+      });
+      const code: number = response.responseCode as number;
+      const body: string = typeof response.result === 'string' ? response.result : JSON.stringify(response.result);
+      if (code < 200 || code >= 300) {
+        let errDetail: string = `HTTP ${code}`;
+        try {
+          const obj = JSON.parse(body) as Record<string, Object>;
+          const eStr: string = OverlayService.readStr(obj, 'error');
+          if (eStr.length > 0) {
+            errDetail = eStr;
+          }
+        } catch (_e) {
+        }
+        return { ok: false, message: `拉取电脑配置失败：${errDetail}`, importedProfiles: 0, importedProfileUid: '', activated: false };
+      }
+      return await OverlayService.importBackupBundleJson(context, body);
+    } catch (_err) {
+      return {
+        ok: false,
+        message: '无法连接电脑同步地址：请确认手机与电脑在同一 Wi-Fi，且电脑端切换正确局域网 IP / 防火墙放行',
+        importedProfiles: 0,
+        importedProfileUid: '',
+        activated: false
+      };
+    } finally {
+      request.destroy();
+    }
+  }
+
+  /**
    * Imports a cross-platform JSON backup bundle (exported from Windows Desktop or HarmonyOS).
+   * Tailscale sync strictly applies ONLY routing policy (SplitDNS domains, acceptRoutes, MagicDNS);
+   * phone's own hostname, authKey, exitNode, and Tailscale login state are NEVER overwritten!
    */
   static async importBackupBundleJson(context: common.Context, rawJson: string): Promise<BackupImportResult> {
     try {
       const parsed = JSON.parse(rawJson.trim()) as Record<string, Object>;
       if (!parsed || typeof parsed !== 'object') {
-        return { ok: false, message: '无效的迁移包 JSON 格式', importedProfiles: 0 };
+        return { ok: false, message: '无效的迁移包 JSON 格式', importedProfiles: 0, importedProfileUid: '', activated: false };
       }
 
       const ovObj: Object | undefined = parsed['overlay'];
+      let syncedCustomCount: number = 0;
+      let syncedAiCount: number = 0;
       if (ovObj && typeof ovObj === 'object') {
         const defaults: CustomOverlayConfig = createDefaultOverlayConfig();
         const nextOv: CustomOverlayConfig = OverlayService.parseConfigObj(ovObj as Record<string, Object>, defaults);
         await OverlayService.save(context, nextOv);
+        syncedCustomCount = OverlayService.parseCustomProxiesYaml(nextOv.customProxiesYaml).names.length;
+        syncedAiCount = nextOv.aiProviders.length;
       }
 
-      const tsObj: Object | undefined = parsed['tailscalePrefs'];
+      // Accept new clean `tailscaleRouting` or legacy `tailscalePrefs` — ALWAYS preserve device-local identity/credentials!
+      const tsObj: Object | undefined = parsed['tailscaleRouting'] ? parsed['tailscaleRouting'] : parsed['tailscalePrefs'];
+      let syncedSplitCount: number = 0;
       if (tsObj && typeof tsObj === 'object') {
         const curTs: TailscaleNativePrefs = await TailscalePrefsService.load(context);
         const rec = tsObj as Record<string, Object>;
+        const nextSplit: string[] = OverlayService.readStrArr(rec, 'splitDnsDomains');
+        syncedSplitCount = nextSplit.length;
         const nextTs: TailscaleNativePrefs = {
           managedByApp: typeof rec['managedByApp'] === 'boolean' ? rec['managedByApp'] as boolean : curTs.managedByApp,
           enabled: typeof rec['enabled'] === 'boolean' ? rec['enabled'] as boolean : curTs.enabled,
           proxyName: OverlayService.readNonEmpty(rec, 'proxyName', curTs.proxyName),
+          // Device-local fields strictly preserved on phone:
           hostname: curTs.hostname,
+          authKey: curTs.authKey,
+          exitNode: curTs.exitNode,
+          exitNodeAllowLan: curTs.exitNodeAllowLan,
+          // Shared routing policy synced from PC:
           controlUrl: OverlayService.readStr(rec, 'controlUrl'),
           acceptRoutes: typeof rec['acceptRoutes'] === 'boolean' ? rec['acceptRoutes'] as boolean : curTs.acceptRoutes,
-          exitNode: OverlayService.readStr(rec, 'exitNode'),
-          exitNodeAllowLan: typeof rec['exitNodeAllowLan'] === 'boolean' ? rec['exitNodeAllowLan'] as boolean : curTs.exitNodeAllowLan,
-          authKey: OverlayService.readStr(rec, 'authKey') === '<REDACTED>' ? curTs.authKey : OverlayService.readStr(rec, 'authKey'),
           autoInjectMagicDns: typeof rec['autoInjectMagicDns'] === 'boolean' ? rec['autoInjectMagicDns'] as boolean : curTs.autoInjectMagicDns,
-          tailnetSuffix: OverlayService.readStr(rec, 'tailnetSuffix'),
+          tailnetSuffix: OverlayService.readStr(rec, 'tailnetSuffix').length > 0 ? OverlayService.readStr(rec, 'tailnetSuffix') : curTs.tailnetSuffix,
           autoSyncSplitDns: typeof rec['autoSyncSplitDns'] === 'boolean' ? rec['autoSyncSplitDns'] as boolean : curTs.autoSyncSplitDns,
-          splitDnsDomains: OverlayService.readStrArr(rec, 'splitDnsDomains')
+          splitDnsDomains: nextSplit.length > 0 ? nextSplit : curTs.splitDnsDomains
         };
         await TailscalePrefsService.save(context, nextTs);
       }
 
+      const existingState: ProfileState = await ProfileStore.load(context);
+      const hadExistingActive: boolean = existingState.currentUid.length > 0;
       let importedCount: number = 0;
+      let lastImportedUid: string = '';
+      let activatedNew: boolean = false;
       const rawProfiles: Object | undefined = parsed['profiles'];
       if (Array.isArray(rawProfiles)) {
         const arr: Object[] = rawProfiles as Object[];
@@ -929,10 +1019,9 @@ export class OverlayService {
           if (!item) {
             continue;
           }
-          const name: string = OverlayService.readNonEmpty(item, 'name', `迁移配置 ${i + 1}`);
+          const name: string = OverlayService.readNonEmpty(item, 'name', `同步配置 ${i + 1}`);
           const url: string = OverlayService.readStr(item, 'url');
           const content: string = OverlayService.readStr(item, 'content');
-          const isActive: boolean = item['active'] === true;
 
           let profile: ClashProfile;
           if (url.length > 0 && url.indexOf('<REDACTED>') < 0) {
@@ -963,20 +1052,28 @@ export class OverlayService {
             }
           }
           await ProfileStore.addRemote(context, profile);
-          if (isActive) {
+          lastImportedUid = profile.uid;
+          // Auto-activate only when phone had no active profile yet; otherwise show as "待生效版本" card!
+          if (!hadExistingActive && !activatedNew) {
             await ProfileStore.activate(context, profile.uid);
+            activatedNew = true;
           }
           importedCount++;
         }
       }
 
+      const modeHint: string = (!hadExistingActive && activatedNew)
+        ? '已自动启用，可回首页点「连接」后登录 Tailscale'
+        : (importedCount > 0 ? '新配置已列为「待生效」，确认后点「立即生效」切换' : '已生效（重连 VPN 应用最新分流）');
       return {
         ok: true,
-        message: `迁移包导入成功：已同步自建与 AI 配置、Tailscale，并导入 ${importedCount} 份配置`,
-        importedProfiles: importedCount
+        message: `同步成功：自建节点 ${syncedCustomCount} 个 · ${syncedAiCount} 家 AI · Tailscale 分流域 ${syncedSplitCount} 个 · 配置 ${importedCount} 份（${modeHint}）`,
+        importedProfiles: importedCount,
+        importedProfileUid: lastImportedUid,
+        activated: activatedNew
       };
     } catch (_err) {
-      return { ok: false, message: '解析迁移包 JSON 失败，请确认内容完整', importedProfiles: 0 };
+      return { ok: false, message: '解析迁移包 JSON 失败，请确认内容完整', importedProfiles: 0, importedProfileUid: '', activated: false };
     }
   }
 

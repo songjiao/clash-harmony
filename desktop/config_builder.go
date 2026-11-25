@@ -3,8 +3,11 @@ package main
 import (
 	"fmt"
 	"io"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -230,6 +233,21 @@ func sanitizeDesktopDNS(yamlText string) string {
 			if val == "127.0.0.1:7874" || val == "0.0.0.0:7874" || val == ":7874" {
 				newDNS = append(newDNS, leadingSpaces(line)+"listen: 127.0.0.1:17874")
 				continue
+			}
+		}
+
+		// Rewrite .0 fake-ip-range (e.g. BitzNet's 198.18.0.0/15) to 198.18.0.1/16 so Mihomo's
+		// parseTun never derives the illegal .0 network IP 198.18.0.0/30 for Windows Wintun.
+		if strings.HasPrefix(trimmed, "fake-ip-range:") {
+			val := strings.TrimSpace(stripQuotes(strings.TrimSpace(trimmed[len("fake-ip-range:"):])))
+			if p, pErr := netip.ParsePrefix(val); pErr == nil && p.Addr().Is4() {
+				a4 := p.Addr().As4()
+				if a4[3] == 0 {
+					a4[3] = 1
+					fixedPrefix := netip.PrefixFrom(netip.AddrFrom4(a4), p.Bits())
+					newDNS = append(newDNS, leadingSpaces(line)+"fake-ip-range: "+fixedPrefix.String())
+					continue
+				}
 			}
 		}
 
@@ -539,6 +557,12 @@ func ApplyTailscalePrefsToYAML(yamlText string, prefs TailscaleNativePrefs) stri
 	}
 	if prefs.Enabled && len(activeSplitDomains) > 0 {
 		resultText = ensureSplitDNSRules(resultText, proxyName, activeSplitDomains)
+	}
+	if prefs.Enabled && prefs.AcceptRoutes && len(prefs.SubnetRoutes) > 0 {
+		safeRoutes := filterNonLocalSubnetRoutes(prefs.SubnetRoutes, localPhysicalSubnets())
+		if len(safeRoutes) > 0 {
+			resultText = ensureTailscaleSubnetRouteRules(resultText, proxyName, safeRoutes)
+		}
 	}
 	if prefs.Enabled && prefs.AutoInjectMagicDNS {
 		resultText = ensureTailscaleBaseRules(resultText, proxyName)
@@ -857,6 +881,153 @@ func ensureTailscaleBaseRules(yamlText, proxyName string) string {
 	}
 	if !strings.Contains(sectionLower, "fd7a:115c:a1e0::/48,"+strings.ToLower(proxyName)) {
 		toInsert = append(toInsert, fmt.Sprintf("%sIP-CIDR6,fd7a:115c:a1e0::/48,%s,no-resolve", rulePrefix, proxyName))
+	}
+	if len(toInsert) == 0 {
+		return yamlText
+	}
+	out := make([]string, 0, len(lines)+len(toInsert))
+	out = append(out, lines[:rulesHeader+1]...)
+	out = append(out, toInsert...)
+	out = append(out, lines[rulesHeader+1:]...)
+	return strings.Join(out, "\n")
+}
+
+// normalizeCIDRList parses, deduplicates, and sorts valid non-default IPv4/IPv6 subnet CIDRs,
+// excluding default exit-node routes (0.0.0.0/0, ::/0) and Tailscale's own CGNAT/ULA ranges.
+func normalizeCIDRList(raw []string) []string {
+	cgnat := netip.MustParsePrefix("100.64.0.0/10")
+	tsULA := netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+	seen := map[string]bool{}
+	out := make([]string, 0, len(raw))
+	for _, s := range raw {
+		p, err := netip.ParsePrefix(strings.TrimSpace(s))
+		if err != nil || !p.IsValid() {
+			continue
+		}
+		p = p.Masked()
+		if p.Bits() == 0 {
+			// Skip 0.0.0.0/0 and ::/0 (exit node default routes)
+			continue
+		}
+		if p.Overlaps(cgnat) || p.Overlaps(tsULA) {
+			continue
+		}
+		key := p.String()
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, key)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// localPhysicalSubnets returns the active IPv4/IPv6 subnets of local physical NICs,
+// skipping loopback, TUN/virtual VPN adapters, link-local, and fake-ip ranges.
+func localPhysicalSubnets() []netip.Prefix {
+	fakeIP := netip.MustParsePrefix("198.18.0.0/15")
+	cgnat := netip.MustParsePrefix("100.64.0.0/10")
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var out []netip.Prefix
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		nameLow := strings.ToLower(iface.Name)
+		if strings.Contains(nameLow, "clash") ||
+			strings.Contains(nameLow, "tailscale") ||
+			strings.Contains(nameLow, "wintun") ||
+			strings.Contains(nameLow, "wireguard") ||
+			strings.Contains(nameLow, "utun") ||
+			strings.Contains(nameLow, "meta") ||
+			strings.Contains(nameLow, "tun") {
+			continue
+		}
+		addrs, aErr := iface.Addrs()
+		if aErr != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipNet, ok := a.(*net.IPNet)
+			if !ok || ipNet == nil {
+				continue
+			}
+			addr, okAddr := netip.AddrFromSlice(ipNet.IP)
+			if !okAddr {
+				continue
+			}
+			addr = addr.Unmap()
+			if addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() {
+				continue
+			}
+			ones, _ := ipNet.Mask.Size()
+			if ones <= 0 {
+				continue
+			}
+			p := netip.PrefixFrom(addr, ones).Masked()
+			if p.Overlaps(fakeIP) || p.Overlaps(cgnat) {
+				continue
+			}
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// filterNonLocalSubnetRoutes removes any Tailscale subnet route that overlaps with local physical LANs
+// so the host never routes its own Wi-Fi/Ethernet gateway back into Tailscale.
+func filterNonLocalSubnetRoutes(cidrs []string, localNets []netip.Prefix) []string {
+	cleaned := normalizeCIDRList(cidrs)
+	out := make([]string, 0, len(cleaned))
+	for _, c := range cleaned {
+		p, err := netip.ParsePrefix(c)
+		if err != nil {
+			continue
+		}
+		conflict := false
+		for _, loc := range localNets {
+			if p.Overlaps(loc) {
+				conflict = true
+				break
+			}
+		}
+		if !conflict {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// ensureTailscaleSubnetRouteRules prepends IP-CIDR / IP-CIDR6 rules for approved Tailscale subnet routes
+// at the top of `rules:` so they take precedence over generic `IP-CIDR,192.168.0.0/16,DIRECT` or `GEOIP,CN,DIRECT`.
+func ensureTailscaleSubnetRouteRules(yamlText, proxyName string, subnetRoutes []string) string {
+	if len(subnetRoutes) == 0 {
+		return yamlText
+	}
+	lines := strings.Split(yamlText, "\n")
+	rulesHeader, rulesEnd, rulePrefix := findRulesSection(lines)
+	if rulesHeader < 0 {
+		return yamlText
+	}
+	sectionLower := strings.ToLower(strings.Join(lines[rulesHeader:rulesEnd], "\n"))
+	var toInsert []string
+	for _, cidr := range normalizeCIDRList(subnetRoutes) {
+		p, err := netip.ParsePrefix(cidr)
+		if err != nil {
+			continue
+		}
+		ruleType := "IP-CIDR"
+		if p.Addr().Is6() {
+			ruleType = "IP-CIDR6"
+		}
+		needle := strings.ToLower(fmt.Sprintf("%s,%s,", ruleType, cidr))
+		if strings.Contains(sectionLower, needle) {
+			continue
+		}
+		toInsert = append(toInsert, fmt.Sprintf("%s%s,%s,%s,no-resolve", rulePrefix, ruleType, cidr, proxyName))
 	}
 	if len(toInsert) == 0 {
 		return yamlText

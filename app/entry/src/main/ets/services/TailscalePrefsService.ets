@@ -195,6 +195,9 @@ export class TailscalePrefsService {
     if (prefs.enabled && activeSplitDomains.length > 0) {
       resultText = TailscalePrefsService.ensureSplitDnsRules(resultText, proxyName, activeSplitDomains);
     }
+    if (prefs.enabled) {
+      resultText = TailscalePrefsService.ensureTailscaleBaseRules(resultText, proxyName);
+    }
     return resultText;
   }
 
@@ -530,6 +533,73 @@ export class TailscalePrefsService {
     }
 
     return working.join('\n');
+  }
+
+  private static ensureTailscaleBaseRules(yamlText: string, proxyName: string): string {
+    const lines: string[] = yamlText.split('\n');
+    let rulesHeader: number = -1;
+    let rulesEnd: number = lines.length;
+    let rulePrefix: string = '  - ';
+    let foundPrefix: boolean = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line: string = lines[i];
+      const trimmed: string = line.trim();
+      if (rulesHeader < 0) {
+        if (!line.startsWith(' ') && !line.startsWith('\t') && trimmed === 'rules:') {
+          rulesHeader = i;
+        }
+        continue;
+      }
+      if (trimmed.length === 0 || trimmed.startsWith('#')) {
+        continue;
+      }
+      if (!line.startsWith(' ') && !line.startsWith('\t') && !line.startsWith('-')) {
+        rulesEnd = i;
+        break;
+      }
+      if (!foundPrefix && trimmed.startsWith('- ')) {
+        const dashIdx: number = line.indexOf('-');
+        rulePrefix = `${line.substring(0, dashIdx)}- `;
+        foundPrefix = true;
+      }
+    }
+    if (rulesHeader < 0) {
+      return yamlText;
+    }
+
+    const sectionLower: string = lines.slice(rulesHeader, rulesEnd).join('\n').toLowerCase();
+    const proxyLower: string = proxyName.toLowerCase();
+    const toInsert: string[] = [];
+    if (sectionLower.indexOf('tailscale.com,') < 0) {
+      toInsert.push(`${rulePrefix}DOMAIN-SUFFIX,tailscale.com,DIRECT`);
+    }
+    if (sectionLower.indexOf('tailscale.io,') < 0) {
+      toInsert.push(`${rulePrefix}DOMAIN-SUFFIX,tailscale.io,DIRECT`);
+    }
+    if (sectionLower.indexOf('domain-suffix,ts.net,') < 0) {
+      toInsert.push(`${rulePrefix}DOMAIN-SUFFIX,ts.net,${proxyName}`);
+    }
+    if (sectionLower.indexOf(`100.64.0.0/10,${proxyLower}`) < 0) {
+      toInsert.push(`${rulePrefix}IP-CIDR,100.64.0.0/10,${proxyName},no-resolve`);
+    }
+    if (sectionLower.indexOf(`fd7a:115c:a1e0::/48,${proxyLower}`) < 0) {
+      toInsert.push(`${rulePrefix}IP-CIDR6,fd7a:115c:a1e0::/48,${proxyName},no-resolve`);
+    }
+    if (toInsert.length === 0) {
+      return yamlText;
+    }
+
+    const out: string[] = [];
+    for (let i = 0; i <= rulesHeader; i++) {
+      out.push(lines[i]);
+    }
+    for (let i = 0; i < toInsert.length; i++) {
+      out.push(toInsert[i]);
+    }
+    for (let i = rulesHeader + 1; i < lines.length; i++) {
+      out.push(lines[i]);
+    }
+    return out.join('\n');
   }
 
   private static collectProtectedSubdomains(lines: string[], splitDomains: string[]): string[] {

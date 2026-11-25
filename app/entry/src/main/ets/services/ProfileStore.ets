@@ -1,5 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
+import { fileIo } from '@kit.CoreFileKit';
 import { ClashProfile, createEmptyProfileState, ProfileState } from '../models/Profile';
 
 const STORE_NAME: string = 'clash_harmony_profiles';
@@ -113,6 +114,24 @@ export class ProfileStore {
     };
     await ProfileStore.save(context, next);
     return next;
+  }
+
+  static async clearAll(context: common.Context): Promise<ProfileState> {
+    const empty: ProfileState = createEmptyProfileState();
+    await ProfileStore.save(context, empty);
+    const dirs: string[] = [
+      `${context.filesDir}/profiles`,
+      `${context.filesDir}/profile_versions`
+    ];
+    for (let i = 0; i < dirs.length; i++) {
+      try {
+        if (await fileIo.access(dirs[i])) {
+          await fileIo.rmdir(dirs[i]);
+        }
+      } catch (_err) {
+      }
+    }
+    return empty;
   }
 
   private static parse(raw: string): ProfileState {

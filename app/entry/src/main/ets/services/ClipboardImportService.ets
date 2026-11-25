@@ -3,15 +3,80 @@ import { pasteboard } from '@kit.BasicServicesKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { ClashProfile, createLocalProfile, createRemoteProfile, ProfileState } from '../models/Profile';
 import { ClashConfigParserService, ParsedProxyNode } from './ClashConfigParserService';
+import { ConvertedSubscription, GenericSubscriptionConverterService } from './GenericSubscriptionConverterService';
 import { ProfileStore } from './ProfileStore';
+
+export interface ClipboardReadResult {
+  ok: boolean;
+  text: string;
+  message: string;
+}
 
 export interface ClipboardImportResult {
   ok: boolean;
   message: string;
   state: ProfileState;
+  importedUid: string;
+  isRemote: boolean;
 }
 
 export class ClipboardImportService {
+  static async readClipboardText(): Promise<ClipboardReadResult> {
+    try {
+      const systemPasteboard: pasteboard.SystemPasteboard = pasteboard.getSystemPasteboard();
+      const data: pasteboard.PasteData = await systemPasteboard.getData();
+      const text: string = data.getPrimaryText();
+      if (text.trim().length === 0) {
+        return {
+          ok: false,
+          text: '',
+          message: '剪贴板为空，请先复制配置 YAML 或订阅链接后再粘贴'
+        };
+      }
+      return {
+        ok: true,
+        text: text,
+        message: '已读取剪贴板内容，请核对校验结果后保存'
+      };
+    } catch (err) {
+      const detail: string = err ? String(err) : '';
+      const hint: string = detail.length > 0 ? `（${detail}）` : '';
+      return {
+        ok: false,
+        text: '',
+        message: `剪贴板读取失败${hint}，可直接长按下方文本框手动粘贴`
+      };
+    }
+  }
+
+  static async saveValidatedYamlProfile(
+    context: common.Context,
+    name: string,
+    yamlText: string
+  ): Promise<ClipboardImportResult> {
+    const state: ProfileState = await ProfileStore.load(context);
+    try {
+      const uid: string = `clipboard_${Date.now()}`;
+      const dir: string = `${context.filesDir}/profiles`;
+      await ClipboardImportService.ensureDir(dir);
+      const path: string = `${dir}/${uid}.yaml`;
+      await ClipboardImportService.writeText(path, yamlText);
+      const nodes: ParsedProxyNode[] = ClashConfigParserService.parseProxyNodes(yamlText);
+      const cleanName: string = name.trim().length > 0 ? name.trim() : `剪贴板配置`;
+      const profile: ClashProfile = createLocalProfile(cleanName, path, nodes.length, ClipboardImportService.formatBytes(yamlText.length));
+      const nextState: ProfileState = await ProfileStore.replace(context, profile);
+      return {
+        ok: true,
+        message: `已保存新配置「${cleanName}」，解析 ${nodes.length} 个节点`,
+        state: nextState,
+        importedUid: profile.uid,
+        isRemote: false
+      };
+    } catch (_err) {
+      return ClipboardImportService.failure('保存剪贴板配置失败，请检查存储权限', state);
+    }
+  }
+
   static async importProfile(context: common.Context): Promise<ClipboardImportResult> {
     const state: ProfileState = await ProfileStore.load(context);
     try {
@@ -19,38 +84,54 @@ export class ClipboardImportService {
       const data: pasteboard.PasteData = await systemPasteboard.getData();
       const text: string = data.getPrimaryText().trim();
       if (text.length === 0) {
-        return ClipboardImportService.failure('剪贴板没有可导入的文本内容', state);
+        return ClipboardImportService.failure('剪贴板为空，请先复制订阅链接或 Clash YAML 配置', state);
       }
 
       if (text.startsWith('http://') || text.startsWith('https://')) {
-        const name: string = ClipboardImportService.createProfileNameFromUrl(text);
-        const next: ProfileState = await ProfileStore.addRemote(context, createRemoteProfile(name, text));
+        const firstLine: string = text.split('\n')[0].trim();
+        const name: string = ClipboardImportService.createProfileNameFromUrl(firstLine);
+        const remote: ClashProfile = createRemoteProfile(name, firstLine);
+        const next: ProfileState = await ProfileStore.addRemote(context, remote);
         return {
           ok: true,
           message: `已从剪贴板导入订阅：${name}`,
-          state: next
+          state: next,
+          importedUid: remote.uid,
+          isRemote: true
         };
       }
 
+      let yamlText: string = text;
+      let nodeCount: number = 0;
       if (!ClipboardImportService.looksLikeClashYaml(text)) {
-        return ClipboardImportService.failure('剪贴板内容不是订阅 URL 或 Clash YAML', state);
+        const converted: ConvertedSubscription = GenericSubscriptionConverterService.normalizeToClashYaml(text);
+        if (!converted.ok) {
+          return ClipboardImportService.failure('剪贴板内容不是订阅 URL、节点链接或 Clash YAML', state);
+        }
+        yamlText = converted.text;
+        nodeCount = converted.nodeCount;
       }
 
       const uid: string = `clipboard_${Date.now()}`;
       const dir: string = `${context.filesDir}/profiles`;
       await ClipboardImportService.ensureDir(dir);
       const path: string = `${dir}/${uid}.yaml`;
-      await ClipboardImportService.writeText(path, text);
-      const nodes: ParsedProxyNode[] = ClashConfigParserService.parseProxyNodes(text);
-      const profile: ClashProfile = createLocalProfile('剪贴板配置', path, nodes.length, ClipboardImportService.formatBytes(text.length));
+      await ClipboardImportService.writeText(path, yamlText);
+      const nodes: ParsedProxyNode[] = ClashConfigParserService.parseProxyNodes(yamlText);
+      const finalCount: number = nodes.length > 0 ? nodes.length : nodeCount;
+      const profile: ClashProfile = createLocalProfile('剪贴板配置', path, finalCount, ClipboardImportService.formatBytes(yamlText.length));
       const nextState: ProfileState = await ProfileStore.replace(context, profile);
       return {
         ok: true,
-        message: `已从剪贴板导入本地配置，解析 ${nodes.length} 个节点`,
-        state: nextState
+        message: `已从剪贴板导入本地配置，解析 ${finalCount} 个节点`,
+        state: nextState,
+        importedUid: profile.uid,
+        isRemote: false
       };
     } catch (err) {
-      return ClipboardImportService.failure('剪贴板导入失败，请确认已复制文本并授权读取', state);
+      const detail: string = err ? String(err) : '';
+      const hint: string = detail.length > 0 ? `（${detail}）` : '';
+      return ClipboardImportService.failure(`剪贴板读取失败，请确认已复制文本并允许粘贴${hint}`, state);
     }
   }
 
@@ -106,7 +187,9 @@ export class ClipboardImportService {
     return {
       ok: false,
       message: message,
-      state: state
+      state: state,
+      importedUid: '',
+      isRemote: false
     };
   }
 }

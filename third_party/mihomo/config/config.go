@@ -1689,7 +1689,17 @@ func parseTun(rawTun RawTun, dns *DNS, general *General) error {
 	if !tunAddressPrefix.IsValid() {
 		tunAddressPrefix = netip.MustParsePrefix("198.18.0.1/16")
 	}
-	tunAddressPrefix = netip.PrefixFrom(tunAddressPrefix.Addr(), 30)
+	tunAddr := tunAddressPrefix.Addr()
+	if tunAddr.Is4() {
+		a4 := tunAddr.As4()
+		if a4[3] == 0 {
+			// Never assign a .0 network address (e.g. 198.18.0.0 from 198.18.0.0/15) to TUN;
+			// Windows Wintun sockets sourced from .0 abort established TCP streams.
+			a4[3] = 1
+			tunAddr = netip.AddrFrom4(a4)
+		}
+	}
+	tunAddressPrefix = netip.PrefixFrom(tunAddr, 30)
 
 	general.Tun = LC.Tun{
 		Enable:              rawTun.Enable,

@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	appVersion              = "v2.3.5-win"
+	appVersion              = "v2.4.2-win"
 	defaultControllerAddr   = "127.0.0.1:9090"
 	defaultUIAddr           = "127.0.0.1:9091"
 	defaultMixedPort        = 7890
@@ -75,6 +75,7 @@ type TailscaleNativePrefs struct {
 	TailnetSuffix      string   `json:"tailnetSuffix"`
 	AutoSyncSplitDNS   bool     `json:"autoSyncSplitDns"`
 	SplitDNSDomains    []string `json:"splitDnsDomains"`
+	SubnetRoutes       []string `json:"subnetRoutes"`
 }
 
 func defaultTailscaleHostname() string {
@@ -113,6 +114,7 @@ func defaultTailscalePrefs() TailscaleNativePrefs {
 		TailnetSuffix:      "",
 		AutoSyncSplitDNS:   true,
 		SplitDNSDomains:    []string{},
+		SubnetRoutes:       []string{},
 	}
 }
 
@@ -278,6 +280,7 @@ func (s *DataStore) LoadTailscalePrefs() TailscaleNativePrefs {
 		prefs.Hostname = defaultTailscaleHostname()
 	}
 	prefs.SplitDNSDomains = normalizeDomainList(prefs.SplitDNSDomains)
+	prefs.SubnetRoutes = normalizeCIDRList(prefs.SubnetRoutes)
 	return prefs
 }
 
@@ -291,6 +294,7 @@ func (s *DataStore) SaveTailscalePrefs(prefs TailscaleNativePrefs) error {
 		prefs.Hostname = defaultTailscaleHostname()
 	}
 	prefs.SplitDNSDomains = normalizeDomainList(prefs.SplitDNSDomains)
+	prefs.SubnetRoutes = normalizeCIDRList(prefs.SubnetRoutes)
 	return writeAtomicJSON(s.tsPrefsPath(), prefs)
 }
 

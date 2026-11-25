@@ -512,7 +512,7 @@ func ReCreateTun(tunConf LC.Tun, tunnel C.Tunnel) {
 		}
 	}()
 
-	if tunConf.Equal(LastTunConf) {
+	if tunConf.Equal(LastTunConf) && (!tunConf.Enable || tunLister != nil) {
 		if tunLister != nil { // some default value in dialer maybe changed when config reload, reset at here
 			tunLister.OnReload()
 		}
@@ -725,5 +725,8 @@ func closeTunListener() {
 }
 
 func Cleanup() {
+	tunMux.Lock()
 	closeTunListener()
+	LastTunConf = LC.Tun{}
+	tunMux.Unlock()
 }

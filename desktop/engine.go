@@ -295,6 +295,47 @@ func (e *DesktopEngine) Restart() error {
 	return err
 }
 
+// HotReloadRules rebuilds runtime current.yaml and applies it via hub.ApplyConfig WITHOUT
+// tearing down Wintun (since tunConf is unchanged, ReCreateTun calls OnReload() in-place),
+// keeping active TCP streams like agy-cli alive while applying new Tailscale SplitDNS / SubnetRoutes.
+func (e *DesktopEngine) HotReloadRules() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.running {
+		return nil
+	}
+	settings := e.store.LoadSettings()
+	if settings.ActiveProfileID == "" {
+		return fmt.Errorf("no active profile")
+	}
+	_, rawYAML, err := e.store.GetProfile(settings.ActiveProfileID)
+	if err != nil {
+		return err
+	}
+	tsPrefs := e.store.LoadTailscalePrefs()
+	overlay := e.store.LoadOverlay()
+	runtimeYAML, err := BuildRuntimeYAMLWithOverlay(rawYAML, overlay, tsPrefs, settings)
+	if err != nil {
+		return err
+	}
+	runtimePath := e.store.RuntimeConfigPath()
+	if err := writeAtomicBytes(runtimePath, []byte(runtimeYAML)); err != nil {
+		return err
+	}
+	cfg, err := executor.ParseWithPath(runtimePath)
+	if err != nil {
+		return err
+	}
+	if cfg.Controller == nil {
+		cfg.Controller = &config.Controller{}
+	}
+	cfg.Controller.ExternalController = settings.ControllerAddr
+	hub.ApplyConfig(cfg)
+	eagerStartTailscaleProxies()
+	log.Infoln("[Desktop] Hot-reloaded runtime config in-place (TUN preserved)")
+	return nil
+}
+
 func (e *DesktopEngine) UpdateSystemProxyState() error {
 	settings := e.store.LoadSettings()
 	e.mu.Lock()
@@ -517,7 +558,7 @@ func (e *DesktopEngine) splitDNSSyncLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			prefs := e.store.LoadTailscalePrefs()
-			if !prefs.ManagedByApp || !prefs.Enabled || !prefs.AutoSyncSplitDNS {
+			if !prefs.ManagedByApp || !prefs.Enabled || (!prefs.AutoSyncSplitDNS && !prefs.AcceptRoutes) {
 				continue
 			}
 			tsProxy := findActiveTailscaleOutbound()
@@ -541,40 +582,61 @@ func (e *DesktopEngine) splitDNSSyncLoop(ctx context.Context) {
 			if magicSuffix == "" {
 				magicSuffix = strings.TrimSpace(st.MagicDNSSuffix)
 			}
-			dnsCfg, dErr := lc.DNSConfig(qCtx)
-			cancel()
-			if dErr != nil || dnsCfg == nil {
-				continue
-			}
-
-			splits, _ := extractSplitDnsFromConfig(dnsCfg, magicSuffix)
-			discovered := make([]string, 0, len(splits))
-			for _, sp := range splits {
-				discovered = append(discovered, sp.Domain)
-			}
-			discovered = normalizeDomainList(discovered)
-			sort.Strings(discovered)
-
-			existing := normalizeDomainList(prefs.SplitDNSDomains)
-			sort.Strings(existing)
 
 			changed := false
-			if magicSuffix != "" && !strings.EqualFold(prefs.TailnetSuffix, magicSuffix) {
-				prefs.TailnetSuffix = magicSuffix
-				changed = true
+			if prefs.AutoSyncSplitDNS {
+				if dnsCfg, dErr := lc.DNSConfig(qCtx); dErr == nil && dnsCfg != nil {
+					splits, _ := extractSplitDnsFromConfig(dnsCfg, magicSuffix)
+					discovered := make([]string, 0, len(splits))
+					for _, sp := range splits {
+						discovered = append(discovered, sp.Domain)
+					}
+					discovered = normalizeDomainList(discovered)
+					sort.Strings(discovered)
+
+					existing := normalizeDomainList(prefs.SplitDNSDomains)
+					sort.Strings(existing)
+
+					if magicSuffix != "" && !strings.EqualFold(prefs.TailnetSuffix, magicSuffix) {
+						prefs.TailnetSuffix = magicSuffix
+						changed = true
+					}
+					if !sameStringSlice(existing, discovered) && len(discovered) > 0 {
+						prefs.SplitDNSDomains = discovered
+						changed = true
+					}
+				}
 			}
-			if !sameStringSlice(existing, discovered) && len(discovered) > 0 {
-				prefs.SplitDNSDomains = discovered
-				changed = true
+
+			if prefs.AcceptRoutes {
+				var rawRoutes []string
+				for _, peer := range st.Peer {
+					if peer == nil || !peer.Online || peer.PrimaryRoutes == nil {
+						continue
+					}
+					for i := 0; i < peer.PrimaryRoutes.Len(); i++ {
+						rawRoutes = append(rawRoutes, peer.PrimaryRoutes.At(i).String())
+					}
+				}
+				discoveredRoutes := filterNonLocalSubnetRoutes(rawRoutes, localPhysicalSubnets())
+				existingRoutes := normalizeCIDRList(prefs.SubnetRoutes)
+				if !sameStringSlice(existingRoutes, discoveredRoutes) {
+					prefs.SubnetRoutes = discoveredRoutes
+					changed = true
+				}
 			}
+			cancel()
+
 			if changed {
-				log.Infoln("[Desktop] Tailscale SplitDNS changed (suffix=%s, domains=%v) -> saving & reloading core",
-					prefs.TailnetSuffix, prefs.SplitDNSDomains)
+				log.Infoln("[Desktop] Tailscale routing changed (suffix=%s, splitDNS=%v, subnetRoutes=%v) -> hot-reloading rules without dropping TUN",
+					prefs.TailnetSuffix, prefs.SplitDNSDomains, prefs.SubnetRoutes)
 				if err := e.store.SaveTailscalePrefs(prefs); err == nil {
 					go func() {
-						_ = e.Restart()
+						if rErr := e.HotReloadRules(); rErr != nil {
+							log.Warnln("[Desktop] Hot-reload failed (%v), falling back to full restart", rErr)
+							_ = e.Restart()
+						}
 					}()
-					return
 				}
 			}
 		}

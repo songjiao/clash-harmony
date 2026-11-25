@@ -24,6 +24,7 @@ type DesktopServer struct {
 	onElevate func(enableTun bool)
 	srv       *http.Server
 	addr      string
+	syncMgr   *SyncSessionManager
 }
 
 func NewDesktopServer(store *DataStore, engine *DesktopEngine, onElevate func(enableTun bool)) *DesktopServer {
@@ -31,6 +32,7 @@ func NewDesktopServer(store *DataStore, engine *DesktopEngine, onElevate func(en
 		store:     store,
 		engine:    engine,
 		onElevate: onElevate,
+		syncMgr:   NewSyncSessionManager(),
 	}
 }
 
@@ -54,6 +56,9 @@ func (s *DesktopServer) Start(addr string) (string, error) {
 }
 
 func (s *DesktopServer) Stop() {
+	if s.syncMgr != nil {
+		s.syncMgr.Close()
+	}
 	if s.srv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 		_ = s.srv.Shutdown(ctx)
@@ -328,6 +333,33 @@ func (s *DesktopServer) buildMux() http.Handler {
 			"presets":          allAIProviderPresets(),
 			"customProxyNames": names,
 		})
+	})
+
+	// Ephemeral LAN QR Sync (PC -> HarmonyOS Phone)
+	mux.HandleFunc("/api/sync/create", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		var req struct {
+			PreferredIP string `json:"preferredIp"`
+		}
+		_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req)
+		info, err := s.syncMgr.Create(s.store, req.PreferredIP)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, info)
+			return
+		}
+		writeJSON(w, http.StatusOK, info)
+	})
+
+	mux.HandleFunc("/api/sync/status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, s.syncMgr.Status())
+	})
+
+	mux.HandleFunc("/api/sync/close", func(w http.ResponseWriter, r *http.Request) {
+		s.syncMgr.Close()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
 	// Portable Backup Export / Import (Windows <-> HarmonyOS sync)

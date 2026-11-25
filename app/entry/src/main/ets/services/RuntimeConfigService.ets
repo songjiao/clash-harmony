@@ -102,6 +102,27 @@ export class RuntimeConfigService {
     managed.push('secret: ""');
 
     const sections: string[] = [base, managed.join('\n')];
+    if (!RuntimeConfigService.hasTopLevelKey(base, 'sniffer')) {
+      const defaultSniffer: string[] = [
+        'sniffer:',
+        '  enable: true',
+        '  force-dns-mapping: true',
+        '  parse-pure-ip: true',
+        '  override-destination: true',
+        '  sniff:',
+        '    HTTP:',
+        '      ports: [80, 8080-8880]',
+        '      override-destination: true',
+        '    TLS:',
+        '      ports: [443, 8443]',
+        '    QUIC:',
+        '      ports: [443, 8443]',
+        '  skip-domain:',
+        '    - Mijia Cloud',
+        '    - +.push.apple.com'
+      ];
+      sections.push(defaultSniffer.join('\n'));
+    }
     if (!RuntimeConfigService.hasTopLevelKey(base, 'dns')) {
       const defaultDns: string[] = [
         'dns:',
@@ -398,19 +419,36 @@ export class RuntimeConfigService {
 
   private static async ensureBundledGeoipDb(context: common.Context, runtimeDir: string): Promise<void> {
     const dbPath: string = `${runtimeDir}/geoip.metadb`;
-    try {
-      if (await fileIo.access(dbPath)) {
-        const stat: fileIo.Stat = fileIo.statSync(dbPath);
-        if (stat.size > 10240) {
-          return;
-        }
-      }
-    } catch (_err) {
-    }
-
     let file: fileIo.File | undefined = undefined;
     try {
+      // Remove any stale/corrupted alternate MMDB files that Mihomo's C.Path.MMDB() checks before geoip.metadb
+      const altNames: string[] = ['Country.mmdb', 'country.mmdb', 'geoip.db'];
+      for (let i = 0; i < altNames.length; i++) {
+        const altPath: string = `${runtimeDir}/${altNames[i]}`;
+        try {
+          if (await fileIo.access(altPath)) {
+            fileIo.unlinkSync(altPath);
+          }
+        } catch (_rmErr) {
+        }
+      }
+
       const rawBytes: Uint8Array = await context.resourceManager.getRawFileContent('geoip.metadb');
+      const expectedSize: number = rawBytes.byteLength;
+      if (expectedSize <= 10240) {
+        return;
+      }
+
+      try {
+        if (await fileIo.access(dbPath)) {
+          const stat: fileIo.Stat = fileIo.statSync(dbPath);
+          if (stat.size === expectedSize) {
+            return;
+          }
+        }
+      } catch (_statErr) {
+      }
+
       const payload: ArrayBuffer = rawBytes.buffer.slice(rawBytes.byteOffset, rawBytes.byteOffset + rawBytes.byteLength);
       file = fileIo.openSync(dbPath, fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
       await fileIo.write(file.fd, payload);

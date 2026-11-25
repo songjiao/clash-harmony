@@ -2,10 +2,12 @@ import { common } from '@kit.AbilityKit';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { scanBarcode, scanCore } from '@kit.ScanKit';
 import { ClashConfigParserService, ParsedConfigSummary, ParsedProxyNode } from '../services/ClashConfigParserService';
-import { ClipboardImportResult, ClipboardImportService } from '../services/ClipboardImportService';
+import { ClipboardImportResult, ClipboardImportService, ClipboardReadResult } from '../services/ClipboardImportService';
 import { CoreBridgeService, CoreBridgeState, ConfigValidationResult } from '../services/CoreBridgeService';
 import { CoreService, CoreSummary } from '../services/CoreService';
+import { ConvertedSubscription, GenericSubscriptionConverterService } from '../services/GenericSubscriptionConverterService';
 import { ClashProfile, createEmptyProfileState, createRemoteProfile, formatProfileUpdatedAt, ProfileState } from '../models/Profile';
 import {
   ConnectionInfo as ControllerConnectionInfo,
@@ -139,17 +141,50 @@ interface TailscaleRuntimeStatus {
   updatedAt: string;
 }
 
+interface HomeActiveNodeItem {
+  group: string;
+  finalNode: string;
+  delay: string;
+  status: string;
+  isAi: boolean;
+  isTs: boolean;
+}
+
+interface HomeNodeTrafficItem {
+  key: string;
+  node: string;
+  group: string;
+  active: number;
+  downloadBytes: number;
+  uploadBytes: number;
+  percent: number;
+}
+
+interface HomeNodeConnDetail {
+  target: string;
+  rule: string;
+  chain: string;
+  download: string;
+  upload: string;
+}
+
+interface ConnBytesRecord {
+  download: number;
+  upload: number;
+}
+
 const NAV_ITEMS: NavItem[] = [
-  { key: 'home', label: '首页', shortLabel: 'H' },
-  { key: 'proxies', label: '代理', shortLabel: 'P' },
-  { key: 'tailscale', label: 'Tailscale', shortLabel: 'T' },
-  { key: 'profiles', label: '配置', shortLabel: 'C' },
-  { key: 'diagnostics', label: '诊断', shortLabel: 'D' }
+  { key: 'home', label: '总览 & 状态', shortLabel: '●' },
+  { key: 'proxies', label: '代理策略组', shortLabel: '⇄' },
+  { key: 'tailscale', label: 'Tailscale 组网', shortLabel: '✦' },
+  { key: 'overlay', label: '自建与分流覆写', shortLabel: '🛡' },
+  { key: 'profiles', label: '订阅与配置', shortLabel: '≡' },
+  { key: 'diagnostics', label: '日志与诊断', shortLabel: '▤' }
 ];
 const LOG_DOMAIN: number = 0x0001;
 const LOG_TAG: string = 'ClashHarmonyIndex';
-const APP_VERSION_NAME: string = 'v2.3.1';
-const APP_BUILD_UPDATED_AT: string = '2026-11-25 21:40';
+const APP_VERSION_NAME: string = 'v2.4.4';
+const APP_BUILD_UPDATED_AT: string = '2026-11-26 00:32';
 const DELAY_TEST_TIMEOUT_MS: number = 4500;
 const DELAY_TEST_URLS: string[] = [
   'https://cp.cloudflare.com/generate_204',
@@ -193,6 +228,7 @@ const EMPTY_CORE_BRIDGE_STATE: CoreBridgeState = {
 struct Index {
   @State private currentTab: string = 'home';
   @State private showSettings: boolean = false;
+  @State private showNavDrawer: boolean = false;
   @State private profileState: ProfileState = createEmptyProfileState();
   @State private summary: CoreSummary = CoreService.createSummary(createEmptyProfileState(), false);
   @State private vpnActionText: string = '连接';
@@ -279,6 +315,34 @@ struct Index {
   @State private proxyRuleTestDetail: string = '';
   @State private proxyRuleTestOk: boolean = true;
   @State private proxyRuleTestIsReject: boolean = false;
+  // Phase 5: PC-aligned Home Telemetry, Max-2-Card Profile List, QR Scan Sync & Clean Tailscale Priority
+  @State private homeActiveNodes: HomeActiveNodeItem[] = [];
+  @State private homePrimaryDelayText: string = '待测';
+  @State private homeNodeTraffic: HomeNodeTrafficItem[] = [];
+  @State private expandedTrafficNodeKeys: string[] = [];
+  @State private homeTrafficConnsTick: number = 0;
+  @State private isTestingActiveNodes: boolean = false;
+  @State private pendingProfileUid: string = '';
+  @State private showOtherProfiles: boolean = false;
+  @State private showTsAdvancedSettings: boolean = false;
+  @State private isQrSyncing: boolean = false;
+  @State private qrSyncBanner: string = '';
+  @State private qrSyncBannerOk: boolean = true;
+  @State private updatingProfileUid: string = '';
+  @State private showClearAllConfirm: boolean = false;
+  @State private showClipboardPanel: boolean = false;
+  @State private clipboardDraftName: string = '';
+  @State private clipboardDraftText: string = '';
+  @State private clipboardValidationChecked: boolean = false;
+  @State private clipboardValidationOk: boolean = false;
+  @State private clipboardValidationMessage: string = '';
+  @State private clipboardValidationStats: string = '';
+  @State private clipboardIsUrl: boolean = false;
+  @State private isSavingClipboard: boolean = false;
+  private homeConnSeenBytes: Record<string, ConnBytesRecord> = {};
+  private homeNodeAccumMap: Record<string, HomeNodeTrafficItem> = {};
+  private homeNodeLiveConnsMap: Record<string, HomeNodeConnDetail[]> = {};
+  private homeNodeRecentConnsMap: Record<string, HomeNodeConnDetail[]> = {};
   // Phase 2: Embedded native Tailscale management
   @State private tsPrefs: TailscaleNativePrefs = createDefaultTailscalePrefs();
   @State private tsControl: TailscaleControlStatus = createEmptyTailscaleControlStatus();
@@ -502,6 +566,8 @@ struct Index {
       this.syncHomeRuntimeFields();
       this.recordLog('info', `VPN 已连接，controller=${controllerReady.version}`);
       hilog.info(LOG_DOMAIN, LOG_TAG, 'toggleVpn: connected');
+      // Auto-trigger active exit nodes latency test right after connect so delays show immediately on Home
+      this.testHomeActiveNodesDelay();
     } catch (err) {
       TrafficPollerService.stop();
       this.stopHomeRefreshLoop();
@@ -665,14 +731,19 @@ struct Index {
     }
     const name: string = this.importName.trim().length > 0 ? this.importName.trim() : this.createProfileNameFromUrl(url);
     const context = getContext(this) as common.Context;
-    const next: ProfileState = await ProfileStore.addRemote(context, createRemoteProfile(name, url));
+    const prevCurrentUid: string = this.profileState.currentUid;
+    const newProfile: ClashProfile = createRemoteProfile(name, url);
+    const next: ProfileState = await ProfileStore.addRemote(context, newProfile);
     this.importUrl = '';
     this.importName = '';
     this.showImportPanel = false;
     this.applyProfileState(next);
+    if (prevCurrentUid.length > 0 && newProfile.uid !== next.currentUid) {
+      this.pendingProfileUid = newProfile.uid;
+    }
     this.statusMessage = `已保存订阅：${name}，正在下载...`;
     this.recordLog('info', this.statusMessage);
-    const updateResult: SubscriptionUpdateResult = await SubscriptionService.updateProfile(context, next.currentUid);
+    const updateResult: SubscriptionUpdateResult = await SubscriptionService.updateProfile(context, newProfile.uid);
     this.applyProfileState(updateResult.state);
     await this.refreshProxyNodes(updateResult.state);
     if (!updateResult.ok) {
@@ -680,35 +751,271 @@ struct Index {
       this.recordLog('warn', updateResult.message);
       return;
     }
-    const runtime: RuntimeConfigResult = await RuntimeConfigService.prepareCurrentProfile(context, updateResult.state);
-    if (runtime.ok) {
-      this.runtimeConfigPath = runtime.configPath;
-      this.runtimeConfigInfo = `${runtime.profileName} · ${runtime.size}`;
-      this.statusMessage = `${updateResult.message}，运行配置已准备`;
+    if (next.currentUid === newProfile.uid) {
+      const runtime: RuntimeConfigResult = await RuntimeConfigService.prepareCurrentProfile(context, updateResult.state);
+      if (runtime.ok) {
+        this.runtimeConfigPath = runtime.configPath;
+        this.runtimeConfigInfo = `${runtime.profileName} · ${runtime.size}`;
+        this.statusMessage = `${updateResult.message}，运行配置已准备`;
+      } else {
+        this.statusMessage = `${updateResult.message}，${runtime.message}`;
+      }
     } else {
-      this.statusMessage = `${updateResult.message}，${runtime.message}`;
+      this.statusMessage = `${updateResult.message}，已列为「待生效版本」`;
     }
     this.syncHomeRuntimeFields();
-    this.recordLog(runtime.ok ? 'info' : 'warn', this.statusMessage);
+    this.recordLog('info', this.statusMessage);
   }
 
-  private async importFromClipboard(): Promise<void> {
-    this.statusMessage = '正在读取剪贴板...';
+  private async launchActiveProfileOnHome(): Promise<void> {
+    this.navigateToTab('home');
+    if (this.toggling) {
+      return;
+    }
+    if (this.isRuntimeConnected()) {
+      await this.toggleVpn();
+      await this.waitForUiUpdate(350);
+    }
+    if (!this.isRuntimeConnected() && !this.toggling) {
+      await this.toggleVpn();
+    }
+  }
+
+  private async openClipboardImportPanel(readFromSystem: boolean): Promise<void> {
+    this.showImportPanel = false;
+    this.showClipboardPanel = true;
+    this.clipboardValidationChecked = false;
+    this.clipboardValidationOk = false;
+    this.clipboardValidationMessage = '';
+    this.clipboardValidationStats = '';
+    this.clipboardIsUrl = false;
+
+    if (!readFromSystem) {
+      return;
+    }
+
+    const readRes: ClipboardReadResult = await ClipboardImportService.readClipboardText();
+    if (!readRes.ok) {
+      this.clipboardValidationChecked = true;
+      this.clipboardValidationOk = false;
+      this.clipboardValidationMessage = readRes.message;
+      this.qrSyncBannerOk = false;
+      this.qrSyncBanner = readRes.message;
+      return;
+    }
+
+    this.clipboardDraftText = readRes.text;
+    const trimmed: string = readRes.text.trim();
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      const firstLine: string = trimmed.split('\n')[0].trim();
+      this.clipboardDraftName = this.createProfileNameFromUrl(firstLine);
+    } else if (this.clipboardDraftName.trim().length === 0) {
+      this.clipboardDraftName = '剪贴板配置';
+    }
+    await this.validateClipboardDraft();
+  }
+
+  private async validateClipboardDraft(): Promise<boolean> {
+    const trimmed: string = this.clipboardDraftText.trim();
+    this.clipboardValidationChecked = true;
+    this.clipboardValidationStats = '';
+    this.clipboardIsUrl = false;
+
+    if (trimmed.length === 0) {
+      this.clipboardValidationOk = false;
+      this.clipboardValidationMessage = '文本框内容为空，请先粘贴 Clash YAML 或订阅链接';
+      return false;
+    }
+
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      this.clipboardIsUrl = true;
+      this.clipboardValidationOk = true;
+      this.clipboardValidationMessage = '检测到远程订阅链接，点击「拉取并保存」将下载并校验配置';
+      return true;
+    }
+
+    let yamlToValidate: string = trimmed;
+    const looksYaml: boolean = trimmed.indexOf('proxies:') >= 0 ||
+      trimmed.indexOf('proxy-providers:') >= 0 ||
+      trimmed.indexOf('proxy-groups:') >= 0 ||
+      trimmed.indexOf('rules:') >= 0;
+
+    if (!looksYaml) {
+      const converted: ConvertedSubscription = GenericSubscriptionConverterService.normalizeToClashYaml(trimmed);
+      if (!converted.ok) {
+        this.clipboardValidationOk = false;
+        this.clipboardValidationMessage = '内容不是有效的 Clash YAML、节点链接或订阅地址（已拦截，不会保存）';
+        return false;
+      }
+      yamlToValidate = converted.text;
+    }
+
     const context = getContext(this) as common.Context;
-    const result: ClipboardImportResult = await ClipboardImportService.importProfile(context);
-    this.applyProfileState(result.state);
-    await this.refreshProxyNodes(result.state);
-    this.statusMessage = result.message;
+    const mergedText: string = await RuntimeConfigService.buildMergedRuntimeYaml(context, yamlToValidate);
+    const res: ConfigValidationResult = CoreBridgeService.validateConfig(mergedText);
+    this.clipboardValidationOk = res.ok;
+    if (res.ok) {
+      this.clipboardValidationMessage = 'Mihomo 内核语法校验通过，可以安全保存';
+      this.clipboardValidationStats = `${res.proxyCount} 节点 · ${res.groupCount} 策略组 · ${res.ruleCount} 规则 · DNS ${res.dnsMode}`;
+      return true;
+    }
+    this.clipboardValidationMessage = res.line > 0 ? `第 ${res.line} 行语法错误：${res.error}` : `语法校验未通过：${res.error}`;
+    return false;
+  }
+
+  private async saveClipboardDraft(asCurrentVersion: boolean): Promise<void> {
+    if (this.isSavingClipboard) {
+      return;
+    }
+    this.isSavingClipboard = true;
+    try {
+      const valid: boolean = await this.validateClipboardDraft();
+      if (!valid) {
+        this.qrSyncBannerOk = false;
+        this.qrSyncBanner = this.clipboardValidationMessage;
+        return;
+      }
+
+      const context = getContext(this) as common.Context;
+      const trimmed: string = this.clipboardDraftText.trim();
+
+      if (this.clipboardIsUrl) {
+        const firstLine: string = trimmed.split('\n')[0].trim();
+        const name: string = this.clipboardDraftName.trim().length > 0
+          ? this.clipboardDraftName.trim()
+          : this.createProfileNameFromUrl(firstLine);
+        const prevUids: string[] = this.collectProfileUids(this.profileState);
+        const newProfile: ClashProfile = createRemoteProfile(name, firstLine);
+        const next: ProfileState = await ProfileStore.addRemote(context, newProfile);
+        this.applyProfileState(next);
+        this.trackNewlyImportedPendingUid(prevUids, next);
+        this.qrSyncBannerOk = true;
+        this.qrSyncBanner = `正在拉取订阅「${name}」...`;
+        const updateResult: SubscriptionUpdateResult = await SubscriptionService.updateProfile(context, newProfile.uid);
+        this.applyProfileState(updateResult.state);
+        await this.refreshProxyNodes(updateResult.state);
+        this.qrSyncBannerOk = updateResult.ok;
+        this.qrSyncBanner = updateResult.ok
+          ? `${updateResult.message}${updateResult.state.currentUid === newProfile.uid ? '' : '（已加入待生效配置）'}`
+          : `订阅保存成功，但拉取失败：${updateResult.message}`;
+        this.statusMessage = this.qrSyncBanner;
+        if (updateResult.ok) {
+          this.showClipboardPanel = false;
+          this.clipboardDraftText = '';
+          this.clipboardDraftName = '';
+        }
+        this.syncHomeRuntimeFields();
+        this.recordLog(updateResult.ok ? 'info' : 'warn', this.qrSyncBanner);
+        return;
+      }
+
+      let yamlToSave: string = trimmed;
+      const looksYaml: boolean = trimmed.indexOf('proxies:') >= 0 ||
+        trimmed.indexOf('proxy-providers:') >= 0 ||
+        trimmed.indexOf('proxy-groups:') >= 0 ||
+        trimmed.indexOf('rules:') >= 0;
+      if (!looksYaml) {
+        const converted: ConvertedSubscription = GenericSubscriptionConverterService.normalizeToClashYaml(trimmed);
+        if (converted.ok) {
+          yamlToSave = converted.text;
+        }
+      }
+
+      const activeProfile: ClashProfile | undefined = this.getCurrentActiveProfile();
+      if (asCurrentVersion && activeProfile) {
+        const currentText: string = await ProfileVersionService.readCurrentText(context, activeProfile);
+        if (currentText.trim() === yamlToSave.trim()) {
+          this.clipboardValidationOk = false;
+          this.clipboardValidationMessage = `内容与当前配置 v${this.activeVersionNumber > 0 ? this.activeVersionNumber : 1} 完全一致，无需重复生成版本`;
+          return;
+        }
+        const commit: VersionCommitResult = await ProfileVersionService.commitNewVersion(
+          context,
+          activeProfile,
+          yamlToSave,
+          'import',
+          '剪贴板校验导入'
+        );
+        if (!commit.ok) {
+          this.clipboardValidationOk = false;
+          this.clipboardValidationMessage = commit.message;
+          return;
+        }
+        this.applyProfileState(commit.state);
+        await this.loadProfileWorkspaceData(activeProfile.uid);
+        await this.refreshProxyNodes(commit.state);
+        this.showClipboardPanel = false;
+        this.clipboardDraftText = '';
+        this.clipboardDraftName = '';
+        this.qrSyncBannerOk = true;
+        this.qrSyncBanner = `已校验并保存为「${activeProfile.name}」新版本 v${commit.version}`;
+        this.statusMessage = this.qrSyncBanner;
+        this.syncHomeRuntimeFields();
+        this.recordLog('info', this.qrSyncBanner);
+        return;
+      }
+
+      const prevUids: string[] = this.collectProfileUids(this.profileState);
+      const saveRes: ClipboardImportResult = await ClipboardImportService.saveValidatedYamlProfile(
+        context,
+        this.clipboardDraftName,
+        yamlToSave
+      );
+      this.applyProfileState(saveRes.state);
+      this.trackNewlyImportedPendingUid(prevUids, saveRes.state);
+      await this.refreshProxyNodes(saveRes.state);
+      if (saveRes.state.currentUid.length > 0) {
+        await this.loadProfileWorkspaceData(saveRes.state.currentUid);
+      }
+      this.qrSyncBannerOk = saveRes.ok;
+      this.qrSyncBanner = saveRes.message;
+      this.statusMessage = saveRes.message;
+      if (saveRes.ok) {
+        this.showClipboardPanel = false;
+        this.clipboardDraftText = '';
+        this.clipboardDraftName = '';
+      }
+      this.syncHomeRuntimeFields();
+      this.recordLog(saveRes.ok ? 'info' : 'warn', saveRes.message);
+    } finally {
+      this.isSavingClipboard = false;
+    }
+  }
+
+  private async clearAllProfiles(): Promise<void> {
+    const context = getContext(this) as common.Context;
+    const emptyState: ProfileState = await ProfileStore.clearAll(context);
+    this.showClearAllConfirm = false;
+    this.pendingProfileUid = '';
+    this.editingProfileUid = '';
+    this.editingProfileName = '';
+    this.versionHistory = [];
+    this.activeVersionNumber = 0;
+    this.editorBaseText = '';
+    this.editorDraftText = '';
+    this.showVersionHistory = false;
+    this.showOtherProfiles = false;
+    this.showDiffPanel = false;
+    this.applyProfileState(emptyState);
+    this.proxyNodes = [];
+    this.clearControllerProxyGroups();
+    this.qrSyncBannerOk = true;
+    this.qrSyncBanner = '已清空全部配置及历史版本';
+    this.statusMessage = '已清空全部配置，请导入或扫码同步新配置';
     this.syncHomeRuntimeFields();
-    this.recordLog(result.ok ? 'info' : 'warn', result.message);
+    this.recordLog('info', '已清空全部配置及历史版本');
   }
 
   private async importLocalFile(): Promise<void> {
     this.statusMessage = '请选择本地 YAML 或订阅文本文件...';
     const context = getContext(this) as common.Context;
+    const prevUids: string[] = this.collectProfileUids(this.profileState);
     const result: FileImportResult = await LocalFileImportService.pickAndImport(context);
     this.applyProfileState(result.state);
+    this.trackNewlyImportedPendingUid(prevUids, result.state);
     await this.refreshProxyNodes(result.state);
+    this.qrSyncBannerOk = result.ok;
+    this.qrSyncBanner = result.message;
     this.statusMessage = result.message;
     this.syncHomeRuntimeFields();
     this.recordLog(result.ok ? 'info' : 'warn', result.message);
@@ -717,9 +1024,13 @@ struct Index {
   private async activateProfile(uid: string): Promise<void> {
     const context = getContext(this) as common.Context;
     const next: ProfileState = await ProfileStore.activate(context, uid);
+    if (this.pendingProfileUid === uid) {
+      this.pendingProfileUid = '';
+    }
     this.applyProfileState(next);
+    await this.loadProfileWorkspaceData(uid);
     await this.refreshProxyNodes(next);
-    this.statusMessage = '已切换当前配置';
+    this.statusMessage = '已切换当前生效配置（若已连接 VPN，请重连使其生效）';
     this.syncHomeRuntimeFields();
     this.recordLog('info', this.statusMessage);
   }
@@ -727,6 +1038,9 @@ struct Index {
   private async removeProfile(uid: string): Promise<void> {
     const context = getContext(this) as common.Context;
     const next: ProfileState = await ProfileStore.remove(context, uid);
+    if (this.pendingProfileUid === uid) {
+      this.pendingProfileUid = '';
+    }
     this.applyProfileState(next);
     await this.refreshProxyNodes(next);
     this.statusMessage = '配置已删除';
@@ -735,29 +1049,80 @@ struct Index {
   }
 
   private async updateProfile(uid: string): Promise<void> {
-    this.statusMessage = '正在更新订阅...';
-    const context = getContext(this) as common.Context;
-    const result: SubscriptionUpdateResult = await SubscriptionService.updateProfile(context, uid);
-    this.applyProfileState(result.state);
-    await this.refreshProxyNodes(result.state);
-    if (!result.ok || result.state.currentUid !== uid) {
-      this.statusMessage = result.message;
-      this.recordLog('warn', result.message);
+    if (this.updatingProfileUid.length > 0) {
       return;
     }
-    const runtime: RuntimeConfigResult = await RuntimeConfigService.prepareCurrentProfile(context, result.state);
-    if (runtime.ok) {
-      this.runtimeConfigPath = runtime.configPath;
-      this.runtimeConfigInfo = `${runtime.profileName} · ${runtime.size}`;
-      this.statusMessage = `${result.message}，运行配置已准备`;
-    } else {
-      this.statusMessage = `${result.message}，${runtime.message}`;
+    this.updatingProfileUid = uid;
+    this.statusMessage = '正在更新订阅...';
+    this.qrSyncBannerOk = true;
+    this.qrSyncBanner = '正在从远程服务器拉取最新订阅...';
+    try {
+      const context = getContext(this) as common.Context;
+      const result: SubscriptionUpdateResult = await SubscriptionService.updateProfile(context, uid);
+      this.applyProfileState(result.state);
+      await this.refreshProxyNodes(result.state);
+      if (!result.ok) {
+        this.qrSyncBannerOk = false;
+        this.qrSyncBanner = `更新订阅失败：${result.message}`;
+        this.statusMessage = this.qrSyncBanner;
+        this.syncHomeRuntimeFields();
+        this.recordLog('warn', this.qrSyncBanner);
+        return;
+      }
+
+      const updatedProfile: ClashProfile | undefined = this.findProfileByUid(uid);
+      if (updatedProfile && updatedProfile.filePath.length > 0) {
+        try {
+          const latestText: string = await fileIo.readText(updatedProfile.filePath);
+          const commit: VersionCommitResult = await ProfileVersionService.commitNewVersion(
+            context,
+            updatedProfile,
+            latestText,
+            'import',
+            '远程订阅更新'
+          );
+          if (commit.ok) {
+            this.applyProfileState(commit.state);
+            if (this.editingProfileUid === uid || commit.state.currentUid === uid) {
+              await this.loadProfileWorkspaceData(uid);
+            }
+          }
+        } catch (_vErr) {
+        }
+      }
+
+      if (this.profileState.currentUid !== uid) {
+        this.qrSyncBannerOk = true;
+        this.qrSyncBanner = result.message;
+        this.statusMessage = result.message;
+        this.syncHomeRuntimeFields();
+        this.recordLog('info', result.message);
+        return;
+      }
+
+      const runtime: RuntimeConfigResult = await RuntimeConfigService.prepareCurrentProfile(context, this.profileState);
+      if (runtime.ok) {
+        this.runtimeConfigPath = runtime.configPath;
+        this.runtimeConfigInfo = `${runtime.profileName} · ${runtime.size}`;
+        this.qrSyncBannerOk = true;
+        this.qrSyncBanner = `${result.message}（若已连接 VPN，点右上角「重启」即可生效）`;
+        this.statusMessage = `${result.message}，运行配置已准备`;
+      } else {
+        this.qrSyncBannerOk = false;
+        this.qrSyncBanner = `${result.message}，但准备运行配置失败：${runtime.message}`;
+        this.statusMessage = this.qrSyncBanner;
+      }
+      this.syncHomeRuntimeFields();
+      this.recordLog(runtime.ok ? 'info' : 'warn', this.qrSyncBanner);
+    } finally {
+      this.updatingProfileUid = '';
     }
-    this.syncHomeRuntimeFields();
-    this.recordLog(runtime.ok ? 'info' : 'warn', this.statusMessage);
   }
 
   private async updateAllProfiles(): Promise<void> {
+    if (this.updatingProfileUid.length > 0) {
+      return;
+    }
     const remoteUids: string[] = [];
     for (let index = 0; index < this.profileState.items.length; index++) {
       if (this.profileState.items[index].type === 'remote') {
@@ -765,28 +1130,39 @@ struct Index {
       }
     }
     if (remoteUids.length === 0) {
-      this.statusMessage = '没有可更新的远程订阅';
+      this.qrSyncBannerOk = false;
+      this.qrSyncBanner = '当前没有可更新的远程订阅配置';
+      this.statusMessage = this.qrSyncBanner;
       return;
     }
-    this.statusMessage = `正在更新 ${remoteUids.length} 个订阅...`;
-    const context = getContext(this) as common.Context;
-    let okCount: number = 0;
-    let latestState: ProfileState = this.profileState;
-    for (let index = 0; index < remoteUids.length; index++) {
-      const result: SubscriptionUpdateResult = await SubscriptionService.updateProfile(context, remoteUids[index]);
-      latestState = result.state;
-      if (result.ok) { okCount++; }
+    this.updatingProfileUid = '__all__';
+    this.qrSyncBannerOk = true;
+    this.qrSyncBanner = `正在更新 ${remoteUids.length} 个远程订阅...`;
+    this.statusMessage = this.qrSyncBanner;
+    try {
+      const context = getContext(this) as common.Context;
+      let okCount: number = 0;
+      let latestState: ProfileState = this.profileState;
+      for (let index = 0; index < remoteUids.length; index++) {
+        const result: SubscriptionUpdateResult = await SubscriptionService.updateProfile(context, remoteUids[index]);
+        latestState = result.state;
+        if (result.ok) { okCount++; }
+      }
+      this.applyProfileState(latestState);
+      await this.refreshProxyNodes(latestState);
+      const runtime: RuntimeConfigResult = await RuntimeConfigService.prepareCurrentProfile(context, latestState);
+      if (runtime.ok) {
+        this.runtimeConfigPath = runtime.configPath;
+        this.runtimeConfigInfo = `${runtime.profileName} · ${runtime.size}`;
+      }
+      this.qrSyncBannerOk = okCount > 0;
+      this.qrSyncBanner = `全量更新完成：${okCount}/${remoteUids.length} 个订阅成功`;
+      this.statusMessage = this.qrSyncBanner;
+      this.syncHomeRuntimeFields();
+      this.recordLog(okCount === remoteUids.length ? 'info' : 'warn', this.statusMessage);
+    } finally {
+      this.updatingProfileUid = '';
     }
-    this.applyProfileState(latestState);
-    await this.refreshProxyNodes(latestState);
-    const runtime: RuntimeConfigResult = await RuntimeConfigService.prepareCurrentProfile(context, latestState);
-    if (runtime.ok) {
-      this.runtimeConfigPath = runtime.configPath;
-      this.runtimeConfigInfo = `${runtime.profileName} · ${runtime.size}`;
-    }
-    this.statusMessage = `全量更新完成：${okCount}/${remoteUids.length} 个订阅成功`;
-    this.syncHomeRuntimeFields();
-    this.recordLog(okCount === remoteUids.length ? 'info' : 'warn', this.statusMessage);
   }
 
   private async refreshControllerStatus(): Promise<void> {
@@ -992,12 +1368,15 @@ struct Index {
     this.selectedProxyGroup = this.resolvePreferredProxyGroupName(groups, previousSelectedGroup);
     this.proxyGroupsSynced = true;
     this.applySelectedProxyGroup();
+    this.rebuildHomeActiveNodes();
   }
 
   private clearControllerProxyGroups(): void {
     this.proxyGroups = [];
     this.proxyGroupsSynced = false;
     this.selectedProxyGroup = '';
+    this.homeActiveNodes = [];
+    this.homePrimaryDelayText = '待测';
   }
 
   private applySelectedProxyGroup(): void {
@@ -1340,6 +1719,7 @@ struct Index {
       const controllerMode: 'rule' | 'global' | 'direct' = this.parseControllerMode(configResult.raw);
       this.proxyMode = controllerMode;
       this.runtimeConnections = this.mapControllerConnections(connections);
+      this.updateHomeTrafficStats(connections);
       const tunReady: RuntimeTunStatus = this.parseRuntimeTunStatus(configResult.raw);
       if (!tunReady.ready) {
         this.vpnTunnelActive = false;
@@ -1813,9 +2193,41 @@ struct Index {
       const data: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.tailscaleAuthUrl);
       await pasteboard.getSystemPasteboard().setData(data);
       this.statusMessage = '已复制 Tailscale 登录链接';
+      this.tsBusyMessage = '已复制 Tailscale 登录链接到剪贴板';
       this.recordLog('info', '已复制 Tailscale 登录链接到剪贴板');
     } catch (_err) {
       this.statusMessage = '复制 Tailscale 登录链接失败';
+    }
+  }
+
+  private async openTailscaleAuthUrlInBrowser(): Promise<void> {
+    if (this.tailscaleAuthUrl.length === 0) {
+      return;
+    }
+    const targetUrl: string = this.tailscaleAuthUrl;
+    try {
+      const uiContext = getContext(this) as common.UIAbilityContext;
+      await uiContext.openLink(targetUrl, { appLinkingOnly: false });
+      this.statusMessage = '已调起系统浏览器进行 Tailscale 授权';
+      this.tsBusyMessage = '已调起系统浏览器，请完成登录后返回本应用';
+      this.recordLog('info', '已通过系统浏览器打开 Tailscale 登录链接');
+      return;
+    } catch (_openErr) {
+    }
+    try {
+      const uiContext = getContext(this) as common.UIAbilityContext;
+      await uiContext.startAbility({
+        action: 'ohos.want.action.viewData',
+        entities: ['entity.system.browsable'],
+        uri: targetUrl
+      });
+      this.statusMessage = '已调起系统浏览器进行 Tailscale 授权';
+      this.tsBusyMessage = '已调起系统浏览器，请完成登录后返回本应用';
+      this.recordLog('info', '已通过系统浏览器打开 Tailscale 登录链接');
+    } catch (_wantErr) {
+      await this.copyTailscaleAuthUrl();
+      this.statusMessage = '无法直接拉起浏览器，已自动复制链接，请手动粘贴打开';
+      this.tsBusyMessage = '无法直接拉起浏览器，已自动复制链接，请手动粘贴打开';
     }
   }
 
@@ -2869,9 +3281,383 @@ struct Index {
       this.speedTestProgress = this.speedTestSummary;
       this.statusMessage = this.speedTestSummary;
       this.applySelectedProxyGroup();
+      this.rebuildHomeActiveNodes();
     } finally {
       this.isSpeedTesting = false;
     }
+  }
+
+  // ============== Phase 5: PC-aligned Home Telemetry, Max-2-Card Profiles & QR Scan Sync ==============
+  private collectProfileUids(state: ProfileState): string[] {
+    const out: string[] = [];
+    for (let i = 0; i < state.items.length; i++) {
+      out.push(state.items[i].uid);
+    }
+    return out;
+  }
+
+  private trackNewlyImportedPendingUid(prevUids: string[], nextState: ProfileState): void {
+    if (prevUids.length === 0) {
+      return;
+    }
+    for (let i = nextState.items.length - 1; i >= 0; i--) {
+      const uid: string = nextState.items[i].uid;
+      if (prevUids.indexOf(uid) < 0 && uid !== nextState.currentUid) {
+        this.pendingProfileUid = uid;
+        return;
+      }
+    }
+  }
+
+  private getCurrentActiveProfile(): ClashProfile | undefined {
+    return CoreService.getCurrentProfile(this.profileState);
+  }
+
+  private getPendingProfile(): ClashProfile | undefined {
+    if (this.pendingProfileUid.length === 0 || this.pendingProfileUid === this.profileState.currentUid) {
+      return undefined;
+    }
+    return this.findProfileByUid(this.pendingProfileUid);
+  }
+
+  private getOtherSavedProfiles(): ClashProfile[] {
+    const out: ClashProfile[] = [];
+    for (let i = 0; i < this.profileState.items.length; i++) {
+      const p: ClashProfile = this.profileState.items[i];
+      if (p.uid === this.profileState.currentUid) {
+        continue;
+      }
+      if (this.pendingProfileUid.length > 0 && p.uid === this.pendingProfileUid) {
+        continue;
+      }
+      out.push(p);
+    }
+    return out;
+  }
+
+  private async scanQrSyncFromPc(): Promise<void> {
+    if (this.isQrSyncing) {
+      return;
+    }
+    this.isQrSyncing = true;
+    this.qrSyncBanner = '';
+    try {
+      const context = getContext(this) as common.Context;
+      const scanRes: scanBarcode.ScanResult = await scanBarcode.startScanForResult(context, {
+        scanTypes: [scanCore.ScanType.QR_CODE],
+        enableMultiMode: false,
+        enableAlbum: true
+      });
+      const rawVal: string = scanRes && scanRes.originalValue ? scanRes.originalValue.trim() : '';
+      if (rawVal.length === 0) {
+        this.qrSyncBannerOk = false;
+        this.qrSyncBanner = '未识别到二维码内容';
+        return;
+      }
+      this.qrSyncBannerOk = true;
+      this.qrSyncBanner = '已扫码，正在从电脑拉取配置...';
+      const res: BackupImportResult = await OverlayService.importFromQrSyncText(context, rawVal);
+      this.qrSyncBannerOk = res.ok;
+      this.qrSyncBanner = res.message;
+      this.statusMessage = res.message;
+      this.recordLog(res.ok ? 'info' : 'warn', res.message);
+      if (res.ok) {
+        await this.loadOverlayConfig();
+        await this.loadTailscalePrefs();
+        const nextState: ProfileState = await ProfileStore.load(context);
+        if (!res.activated && res.importedProfileUid.length > 0 && res.importedProfileUid !== nextState.currentUid) {
+          this.pendingProfileUid = res.importedProfileUid;
+        }
+        this.applyProfileState(nextState);
+        await this.refreshProxyNodes(nextState);
+        if (nextState.currentUid.length > 0) {
+          await this.loadProfileWorkspaceData(nextState.currentUid);
+        }
+      }
+    } catch (_err) {
+      this.qrSyncBannerOk = false;
+      this.qrSyncBanner = '已取消扫码或扫码服务不可用';
+    } finally {
+      this.isQrSyncing = false;
+    }
+  }
+
+  private resolveFinalGroupNode(startName: string): string {
+    let cur: string = startName;
+    const visited: string[] = [];
+    for (let depth = 0; depth < 6; depth++) {
+      if (cur.length === 0 || visited.indexOf(cur) >= 0) {
+        break;
+      }
+      visited.push(cur);
+      const grp: ProxyGroupInfo | undefined = this.findProxyGroupByName(cur);
+      if (grp && grp.now.length > 0 && grp.now !== cur) {
+        cur = grp.now;
+      } else {
+        break;
+      }
+    }
+    return cur;
+  }
+
+  private rebuildHomeActiveNodes(): void {
+    const aiItems: HomeActiveNodeItem[] = [];
+    const mainItems: HomeActiveNodeItem[] = [];
+    const otherItems: HomeActiveNodeItem[] = [];
+    let hasTsItem: boolean = false;
+
+    for (let i = 0; i < this.proxyGroups.length; i++) {
+      const g: ProxyGroupInfo = this.proxyGroups[i];
+      if (g.name === 'GLOBAL') {
+        continue;
+      }
+      const finalNode: string = this.resolveFinalGroupNode(g.now);
+      const delayState: ProxyDelayState = this.getCachedProxyDelayState(finalNode);
+      const isAi: boolean = g.name.indexOf('AI') >= 0;
+      const isTs: boolean = finalNode.toLowerCase() === 'tailscale';
+      if (isTs) {
+        hasTsItem = true;
+      }
+      const item: HomeActiveNodeItem = {
+        group: g.name,
+        finalNode: finalNode.length > 0 ? finalNode : '未选择',
+        delay: delayState.delay,
+        status: delayState.status,
+        isAi: isAi,
+        isTs: isTs
+      };
+      if (isAi) {
+        aiItems.push(item);
+      } else if (g.type === 'Selector') {
+        mainItems.push(item);
+      } else {
+        otherItems.push(item);
+      }
+    }
+
+    const merged: HomeActiveNodeItem[] = [];
+    for (let i = 0; i < aiItems.length; i++) {
+      merged.push(aiItems[i]);
+    }
+    for (let i = 0; i < mainItems.length && merged.length < 4; i++) {
+      merged.push(mainItems[i]);
+    }
+    for (let i = 0; i < otherItems.length && merged.length < 4; i++) {
+      merged.push(otherItems[i]);
+    }
+    if (!hasTsItem && this.tsPrefs.enabled) {
+      merged.push({
+        group: 'Tailscale 组网',
+        finalNode: this.tailscaleIps.length > 0 ? this.tailscaleIps : this.tailscaleStateLabel(),
+        delay: this.tailscaleState === 'Running' ? `${this.tsControl.peers.length} 设备` : this.tailscaleStateLabel(),
+        status: this.tailscaleState === 'Running' ? 'fast' : 'pending',
+        isAi: false,
+        isTs: true
+      });
+    }
+
+    this.homeActiveNodes = merged;
+    if (merged.length > 0 && !merged[0].isTs) {
+      this.homePrimaryDelayText = merged[0].delay;
+    } else if (merged.length > 1) {
+      this.homePrimaryDelayText = merged[1].delay;
+    } else {
+      this.homePrimaryDelayText = '待测';
+    }
+  }
+
+  private async testHomeActiveNodesDelay(): Promise<void> {
+    if (this.isTestingActiveNodes || !this.isRuntimeConnected()) {
+      return;
+    }
+    this.isTestingActiveNodes = true;
+    try {
+      this.rebuildHomeActiveNodes();
+      const targets: string[] = [];
+      for (let i = 0; i < this.homeActiveNodes.length; i++) {
+        const item: HomeActiveNodeItem = this.homeActiveNodes[i];
+        if (!item.isTs && item.finalNode.length > 0 && item.finalNode !== 'DIRECT' && item.finalNode !== 'REJECT' && targets.indexOf(item.finalNode) < 0) {
+          targets.push(item.finalNode);
+        }
+      }
+      if (targets.length === 0) {
+        return;
+      }
+      const updates: ProxyDelayUpdate[] = [];
+      const tasks: Promise<number>[] = [];
+      for (let i = 0; i < targets.length; i++) {
+        tasks.push(this.measureProxyNodeDelay({ name: targets[i], meta: '', delay: '测试中...' }));
+      }
+      const delays: number[] = await Promise.all(tasks);
+      for (let i = 0; i < delays.length; i++) {
+        const fmt = TcpDelayTestService.formatDelay(delays[i]);
+        updates.push({ name: targets[i], delay: fmt.delay, status: fmt.status });
+      }
+      this.updateProxyNodeDelayBatch(updates);
+      this.rebuildHomeActiveNodes();
+    } finally {
+      this.isTestingActiveNodes = false;
+    }
+  }
+
+  private updateHomeTrafficStats(connections: ControllerConnectionInfo[]): void {
+    const keys: string[] = Object.keys(this.homeNodeAccumMap);
+    for (let i = 0; i < keys.length; i++) {
+      this.homeNodeAccumMap[keys[i]].active = 0;
+    }
+    const nextLiveConns: Record<string, HomeNodeConnDetail[]> = {};
+    const liveIds: Record<string, boolean> = {};
+
+    for (let i = 0; i < connections.length; i++) {
+      const c: ControllerConnectionInfo = connections[i];
+      liveIds[c.id] = true;
+      const finalNode: string = c.chains.length > 0 ? c.chains[0] : 'DIRECT';
+      const topGroup: string = c.chains.length > 1 ? c.chains[c.chains.length - 1] : finalNode;
+      const nodeKey: string = `${finalNode}||${topGroup}`;
+
+      const prev: ConnBytesRecord | undefined = this.homeConnSeenBytes[c.id];
+      const prevDown: number = prev ? prev.download : 0;
+      const prevUp: number = prev ? prev.upload : 0;
+      const dDown: number = c.download >= prevDown ? c.download - prevDown : c.download;
+      const dUp: number = c.upload >= prevUp ? c.upload - prevUp : c.upload;
+      this.homeConnSeenBytes[c.id] = { download: c.download, upload: c.upload };
+
+      let acc: HomeNodeTrafficItem | undefined = this.homeNodeAccumMap[nodeKey];
+      if (!acc) {
+        acc = {
+          key: nodeKey,
+          node: finalNode,
+          group: topGroup,
+          active: 0,
+          downloadBytes: 0,
+          uploadBytes: 0,
+          percent: 0
+        };
+        this.homeNodeAccumMap[nodeKey] = acc;
+      }
+      acc.downloadBytes = acc.downloadBytes + dDown;
+      acc.uploadBytes = acc.uploadBytes + dUp;
+      acc.active = acc.active + 1;
+
+      const target: string = c.metadata.host.length > 0
+        ? `${c.metadata.host}:${c.metadata.destinationPort}`
+        : `${c.metadata.destinationIP}:${c.metadata.destinationPort}`;
+      let detailList: HomeNodeConnDetail[] | undefined = nextLiveConns[nodeKey];
+      if (!detailList) {
+        detailList = [];
+        nextLiveConns[nodeKey] = detailList;
+      }
+      if (detailList.length < 20) {
+        detailList.push({
+          target: target,
+          rule: c.rule.length > 0 ? c.rule : 'MATCH',
+          chain: c.chains.join(' <- '),
+          download: this.formatBytes(c.download),
+          upload: this.formatBytes(c.upload)
+        });
+      }
+    }
+
+    // Prune closed connection ids without using ArkTS-disallowed `delete` operator
+    const nextSeen: Record<string, ConnBytesRecord> = {};
+    const seenKeys: string[] = Object.keys(this.homeConnSeenBytes);
+    for (let i = 0; i < seenKeys.length; i++) {
+      const k: string = seenKeys[i];
+      if (liveIds[k]) {
+        nextSeen[k] = this.homeConnSeenBytes[k];
+      }
+    }
+    this.homeConnSeenBytes = nextSeen;
+    this.homeNodeLiveConnsMap = nextLiveConns;
+
+    // Remember latest observed connections per node so tapping a node still shows recent targets even after short-lived bursts close
+    const liveNodeKeys: string[] = Object.keys(nextLiveConns);
+    for (let i = 0; i < liveNodeKeys.length; i++) {
+      const nk: string = liveNodeKeys[i];
+      const liveArr: HomeNodeConnDetail[] = nextLiveConns[nk];
+      if (liveArr && liveArr.length > 0) {
+        this.homeNodeRecentConnsMap[nk] = liveArr.slice(0, 15);
+      }
+    }
+
+    const allRows: HomeNodeTrafficItem[] = [];
+    const accumKeys: string[] = Object.keys(this.homeNodeAccumMap);
+    for (let i = 0; i < accumKeys.length; i++) {
+      const r: HomeNodeTrafficItem = this.homeNodeAccumMap[accumKeys[i]];
+      allRows.push({
+        key: r.key,
+        node: r.node,
+        group: r.group,
+        active: r.active,
+        downloadBytes: r.downloadBytes,
+        uploadBytes: r.uploadBytes,
+        percent: 0
+      });
+    }
+    allRows.sort((a: HomeNodeTrafficItem, b: HomeNodeTrafficItem) => (b.downloadBytes + b.uploadBytes) - (a.downloadBytes + a.uploadBytes));
+    const maxBytes: number = allRows.length > 0 ? Math.max(1, allRows[0].downloadBytes + allRows[0].uploadBytes) : 1;
+    const topRows: HomeNodeTrafficItem[] = allRows.slice(0, 6);
+    for (let i = 0; i < topRows.length; i++) {
+      const total: number = topRows[i].downloadBytes + topRows[i].uploadBytes;
+      topRows[i].percent = Math.max(4, Math.min(100, Math.round((total / maxBytes) * 100)));
+    }
+    this.homeNodeTraffic = topRows;
+    this.homeTrafficConnsTick = this.homeTrafficConnsTick + 1;
+  }
+
+  private isTrafficNodeExpanded(nodeKey: string): boolean {
+    return this.expandedTrafficNodeKeys.indexOf(nodeKey) >= 0;
+  }
+
+  private getTrafficNodeConns(nodeKey: string): HomeNodeConnDetail[] {
+    const liveList: HomeNodeConnDetail[] | undefined = this.homeNodeLiveConnsMap[nodeKey];
+    if (liveList && liveList.length > 0) {
+      return liveList;
+    }
+    const recentList: HomeNodeConnDetail[] | undefined = this.homeNodeRecentConnsMap[nodeKey];
+    return recentList ? recentList : [];
+  }
+
+  private toggleExpandTrafficNode(nodeKey: string): void {
+    const next: string[] = [];
+    let removed: boolean = false;
+    for (let i = 0; i < this.expandedTrafficNodeKeys.length; i++) {
+      if (this.expandedTrafficNodeKeys[i] === nodeKey) {
+        removed = true;
+      } else {
+        next.push(this.expandedTrafficNodeKeys[i]);
+      }
+    }
+    if (!removed) {
+      next.push(nodeKey);
+    }
+    this.expandedTrafficNodeKeys = next;
+  }
+
+  private resetHomeTrafficAccumulators(): void {
+    this.homeConnSeenBytes = {};
+    this.homeNodeAccumMap = {};
+    this.homeNodeLiveConnsMap = {};
+    this.homeNodeRecentConnsMap = {};
+    this.homeNodeTraffic = [];
+    this.expandedTrafficNodeKeys = [];
+    this.homeTrafficConnsTick = this.homeTrafficConnsTick + 1;
+  }
+
+  private delayAccentColor(status: string): string {
+    if (status === 'dead') {
+      return '#DC2626';
+    }
+    if (status === 'slow') {
+      return '#D97706';
+    }
+    if (status === 'fast' || status === 'normal') {
+      return '#0F766E';
+    }
+    if (status === 'testing') {
+      return '#2563EB';
+    }
+    return '#64748B';
   }
 
   private getExitNodeCandidates(): TailscalePeerItem[] {
@@ -3096,76 +3882,272 @@ struct Index {
     return '#F1F5F9';
   }
 
+  private getCurrentPageTitle(): string {
+    if (this.showSettings) {
+      return '系统设置';
+    }
+    if (this.currentTab === 'proxies') {
+      return '代理策略组';
+    }
+    if (this.currentTab === 'tailscale') {
+      return 'Tailscale 组网';
+    }
+    if (this.currentTab === 'overlay') {
+      return '自建与分流覆写';
+    }
+    if (this.currentTab === 'profiles') {
+      return '订阅与配置';
+    }
+    if (this.currentTab === 'diagnostics') {
+      return '日志与诊断';
+    }
+    return '总览 & 状态';
+  }
+
+  private navigateToTab(key: string): void {
+    this.showSettings = false;
+    this.showNavDrawer = false;
+    this.currentTab = key;
+    if (key === 'diagnostics') {
+      this.refreshCoreLogs();
+    } else if (key === 'tailscale') {
+      this.refreshTailscaleStatus();
+    } else if (key === 'overlay') {
+      this.loadOverlayConfig();
+    } else if (key === 'profiles' && this.editingProfileUid.length === 0 && this.profileState.currentUid.length > 0) {
+      this.loadProfileWorkspaceData(this.profileState.currentUid);
+    }
+  }
+
+  private isSwitchEnabled(key: string): boolean {
+    if (key === 'overlay.enabled') {
+      return this.overlayConfig.enabled;
+    }
+    if (key === 'overlay.aiStrictEnabled') {
+      return this.overlayConfig.aiStrictEnabled;
+    }
+    if (key === 'overlay.failClosed') {
+      return this.overlayConfig.failClosed;
+    }
+    if (key === 'ts.managedByApp') {
+      return this.tsPrefs.managedByApp;
+    }
+    if (key === 'ts.enabled') {
+      return this.tsPrefs.enabled;
+    }
+    if (key === 'ts.acceptRoutes') {
+      return this.tsPrefs.acceptRoutes;
+    }
+    if (key === 'ts.autoInjectMagicDns') {
+      return this.tsPrefs.autoInjectMagicDns;
+    }
+    if (key === 'ts.autoSyncSplitDns') {
+      return this.tsPrefs.autoSyncSplitDns;
+    }
+    if (key === 'ts.exitNodeAllowLan') {
+      return this.tsPrefs.exitNodeAllowLan;
+    }
+    return false;
+  }
+
   build() {
-    Column() {
-      this.AppBar()
-      if (this.showSettings) {
-        this.SettingsScreen()
-      } else {
-        if (this.currentTab === 'home') {
+    Stack({ alignContent: Alignment.TopStart }) {
+      Column() {
+        this.AppBar()
+        if (this.showSettings) {
+          this.SettingsScreen()
+        } else if (this.currentTab === 'home') {
           this.HomeScreen()
         } else if (this.currentTab === 'proxies') {
           this.ProxyScreen()
         } else if (this.currentTab === 'tailscale') {
           this.TailscaleScreen()
+        } else if (this.currentTab === 'overlay') {
+          this.OverlayScreen()
         } else if (this.currentTab === 'profiles') {
           this.ProfileScreen()
         } else {
           this.DiagnosticsScreen()
         }
-        this.BottomNavigation()
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor('#F8FAFC')
+
+      if (this.showNavDrawer) {
+        this.NavDrawerOverlay()
       }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F8FAFC')
   }
 
   // ============== AppBar ==============
   @Builder
   private AppBar() {
-    Row() {
+    Row({ space: 10 }) {
+      Button('☰')
+        .width(38).height(36).fontSize(18).fontWeight(FontWeight.Bold)
+        .fontColor('#0F172A').backgroundColor('#F1F5F9').borderRadius(8)
+        .onClick(() => { this.showNavDrawer = !this.showNavDrawer })
+
       Column() {
-        Text(this.showSettings ? '设置' : 'Clash Harmony')
-          .fontSize(20).fontWeight(FontWeight.Bold).fontColor('#0F172A')
-        Text(this.getSubtitle()).fontSize(12).fontColor('#64748B').margin({ top: 2 })
+        Text(this.getCurrentPageTitle())
+          .fontSize(17).fontWeight(FontWeight.Bold).fontColor('#0F172A').maxLines(1)
+        Text(this.getSubtitle())
+          .fontSize(11).fontColor('#64748B').margin({ top: 1 }).maxLines(1)
       }
       .alignItems(HorizontalAlign.Start).layoutWeight(1)
-      Button(this.showSettings ? '返回' : '设置')
-        .height(34).fontSize(13).fontColor('#0F172A').backgroundColor('#EEF2F7').borderRadius(8)
-        .onClick(() => { this.showSettings = !this.showSettings })
+
+      if (this.showSettings) {
+        Button('返回')
+          .height(32).fontSize(12).fontColor('#0F172A').backgroundColor('#EEF2F7').borderRadius(8)
+          .onClick(() => { this.showSettings = false })
+      } else {
+        Text(this.liveConnected ? '● 已连接' : '○ 未连接')
+          .fontSize(12).fontWeight(FontWeight.Bold)
+          .fontColor(this.liveConnected ? '#0F766E' : '#D97706')
+          .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+          .backgroundColor(this.liveConnected ? '#E6FFFB' : '#FFF7ED')
+          .borderRadius(14)
+          .border({ width: 1, color: this.liveConnected ? '#99F6E4' : '#FDE68A' })
+          .onClick(() => {
+            if (this.currentTab !== 'home') {
+              this.navigateToTab('home');
+            }
+          })
+      }
     }
-    .height(56).width('100%').padding({ left: 16, right: 16 })
+    .height(56).width('100%').padding({ left: 12, right: 12 })
     .backgroundColor('#FFFFFF').border({ width: { bottom: 1 }, color: '#E2E8F0' })
   }
 
-  // ============== BottomNav ==============
+  // ============== Left Slide-Over Drawer (PC-aligned 6-item Dark Navy Sidebar) ==============
   @Builder
-  private BottomNavigation() {
+  private NavDrawerOverlay() {
     Row() {
-      ForEach(NAV_ITEMS, (item: NavItem) => {
-        Column({ space: 2 }) {
-          Text(item.shortLabel).fontSize(14).fontWeight(FontWeight.Bold)
-            .fontColor(this.currentTab === item.key ? '#2563EB' : '#64748B')
-          Text(item.label).fontSize(11)
-            .fontColor(this.currentTab === item.key ? '#2563EB' : '#64748B')
-        }
-        .layoutWeight(1).justifyContent(FlexAlign.Center)
-        .backgroundColor(this.currentTab === item.key ? '#EFF6FF' : '#FFFFFF')
-        .onClick(() => {
-          this.currentTab = item.key;
-          if (item.key === 'diagnostics') {
-            this.refreshCoreLogs();
-          } else if (item.key === 'tailscale') {
-            this.refreshTailscaleStatus();
-          } else if (item.key === 'profiles' && this.editingProfileUid.length === 0 && this.profileState.currentUid.length > 0) {
-            this.loadProfileWorkspaceData(this.profileState.currentUid);
+      Column() {
+        // Brand Header
+        Column({ space: 6 }) {
+          Row() {
+            Column({ space: 2 }) {
+              Text('Clash Harmony').fontSize(18).fontWeight(FontWeight.Bold).fontColor('#F8FAFC')
+              Text(`${APP_VERSION_NAME} · Mihomo + Tailscale`).fontSize(11).fontColor('#94A3B8')
+            }
+            .alignItems(HorizontalAlign.Start).layoutWeight(1)
+
+            Text('✕')
+              .fontSize(15).fontWeight(FontWeight.Bold).fontColor('#94A3B8')
+              .width(32).height(32).textAlign(TextAlign.Center)
+              .backgroundColor('#1E293B').borderRadius(8)
+              .onClick(() => { this.showNavDrawer = false })
           }
-        })
-      }, (item: NavItem) => item.key)
+          .width('100%')
+
+          Row({ space: 6 }) {
+            Text(this.liveConnected ? '● VPN 运行中' : '○ VPN 未连接')
+              .fontSize(11).fontWeight(FontWeight.Bold)
+              .fontColor(this.liveConnected ? '#34D399' : '#FBBF24')
+              .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+              .backgroundColor(this.liveConnected ? '#0D3B32' : '#3B2F12')
+              .borderRadius(10)
+            if (this.tailscaleState === 'Running') {
+              Text('TS 在线')
+                .fontSize(11).fontWeight(FontWeight.Bold).fontColor('#38BDF8')
+                .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+                .backgroundColor('#0C2D48').borderRadius(10)
+            }
+          }
+          .width('100%')
+        }
+        .width('100%')
+        .padding({ left: 16, right: 14, top: 18, bottom: 14 })
+        .border({ width: { bottom: 1 }, color: '#1E293B' })
+
+        // 6 PC-aligned Primary Navigation Items
+        Column({ space: 6 }) {
+          ForEach(NAV_ITEMS, (item: NavItem) => {
+            Row({ space: 10 }) {
+              Text(item.label)
+                .fontSize(15)
+                .fontWeight(!this.showSettings && this.currentTab === item.key ? FontWeight.Bold : FontWeight.Medium)
+                .fontColor(!this.showSettings && this.currentTab === item.key ? '#34D399' : '#CBD5E1')
+                .layoutWeight(1)
+            }
+            .width('100%')
+            .padding({ left: 14, right: 14, top: 13, bottom: 13 })
+            .borderRadius(10)
+            .backgroundColor(!this.showSettings && this.currentTab === item.key ? '#0D3B32' : '#0F172A')
+            .border({
+              width: 1,
+              color: !this.showSettings && this.currentTab === item.key ? '#10B981' : '#0F172A'
+            })
+            .onClick(() => { this.navigateToTab(item.key) })
+          }, (item: NavItem) => item.key)
+        }
+        .width('100%')
+        .padding({ left: 12, right: 12, top: 12, bottom: 12 })
+
+        Blank().layoutWeight(1)
+
+        // Drawer Footer Shortcuts
+        Column({ space: 8 }) {
+          Button('📷 扫码同步电脑')
+            .width('100%').height(38).fontSize(13).fontWeight(FontWeight.Bold)
+            .fontColor('#FFFFFF').backgroundColor('#2563EB').borderRadius(8)
+            .onClick(() => {
+              this.navigateToTab('profiles');
+              this.profileSubTab = 'list';
+              this.scanQrSyncFromPc();
+            })
+
+          Row() {
+            Text('⚙ 系统设置')
+              .fontSize(14)
+              .fontWeight(this.showSettings ? FontWeight.Bold : FontWeight.Medium)
+              .fontColor(this.showSettings ? '#34D399' : '#94A3B8')
+              .layoutWeight(1)
+          }
+          .width('100%')
+          .padding({ left: 14, right: 14, top: 11, bottom: 11 })
+          .borderRadius(10)
+          .backgroundColor(this.showSettings ? '#0D3B32' : '#1E293B')
+          .border({ width: 1, color: this.showSettings ? '#10B981' : '#1E293B' })
+          .onClick(() => {
+            this.showSettings = true;
+            this.showNavDrawer = false;
+          })
+        }
+        .width('100%')
+        .padding({ left: 12, right: 12, top: 12, bottom: 18 })
+        .border({ width: { top: 1 }, color: '#1E293B' })
+      }
+      .width(268)
+      .height('100%')
+      .backgroundColor('#0F172A')
+
+      // Tap outside backdrop to dismiss drawer
+      Column()
+        .layoutWeight(1)
+        .height('100%')
+        .backgroundColor('rgba(15, 23, 42, 0.52)')
+        .onClick(() => { this.showNavDrawer = false })
     }
-    .height(52).padding({ left: 10, right: 10, top: 2, bottom: 2 })
-    .backgroundColor('#FFFFFF').border({ width: { top: 1 }, color: '#E2E8F0' })
+    .width('100%')
+    .height('100%')
+  }
+
+  // ============== Top-Level OverlayScreen (aligned with PC 自建与分流覆写) ==============
+  @Builder
+  private OverlayScreen() {
+    Scroll() {
+      Column({ space: 12 }) {
+        this.ProfileOverlaySubScreen()
+      }
+      .padding(16)
+    }
+    .align(Alignment.TopStart)
+    .layoutWeight(1)
   }
 
   // ============== Reusable Components ==============
@@ -3187,12 +4169,35 @@ struct Index {
   }
 
   @Builder
-  private ModeButton(text: string, active: boolean) {
+  private ProfileSubTabOption(text: string, subTab: 'list' | 'editor' | 'flow') {
     Text(text).width('100%').height(36).textAlign(TextAlign.Center).fontSize(13)
-      .fontWeight(active ? FontWeight.Bold : FontWeight.Regular)
-      .fontColor(active ? '#FFFFFF' : '#475569')
-      .backgroundColor(active ? '#0F766E' : '#F8FAFC').borderRadius(6)
-      .border({ width: 1, color: active ? '#0F766E' : '#CBD5E1' })
+      .fontWeight(this.profileSubTab === subTab ? FontWeight.Bold : FontWeight.Regular)
+      .fontColor(this.profileSubTab === subTab ? '#FFFFFF' : '#475569')
+      .backgroundColor(this.profileSubTab === subTab ? '#0F766E' : '#F8FAFC').borderRadius(6)
+      .border({ width: 1, color: this.profileSubTab === subTab ? '#0F766E' : '#CBD5E1' })
+      .layoutWeight(1)
+      .onClick(() => {
+        this.profileSubTab = subTab;
+        if ((subTab === 'editor' || subTab === 'flow') && this.editingProfileUid.length === 0 && this.profileState.currentUid.length > 0) {
+          this.loadProfileWorkspaceData(this.profileState.currentUid);
+        }
+      })
+  }
+
+  @Builder
+  private DiagSegmentOption(text: string, segment: string) {
+    Text(text).width('100%').height(36).textAlign(TextAlign.Center).fontSize(13)
+      .fontWeight(this.diagSegment === segment ? FontWeight.Bold : FontWeight.Regular)
+      .fontColor(this.diagSegment === segment ? '#FFFFFF' : '#475569')
+      .backgroundColor(this.diagSegment === segment ? '#0F766E' : '#F8FAFC').borderRadius(6)
+      .border({ width: 1, color: this.diagSegment === segment ? '#0F766E' : '#CBD5E1' })
+      .layoutWeight(1)
+      .onClick(() => {
+        this.diagSegment = segment;
+        if (segment === '日志') {
+          this.refreshCoreLogs();
+        }
+      })
   }
 
   @Builder
@@ -3205,6 +4210,17 @@ struct Index {
       .border({ width: 1, color: this.proxyMode === mode ? '#0F766E' : '#CBD5E1' })
       .layoutWeight(1)
       .onClick(() => { this.changeProxyMode(mode) })
+  }
+
+  @Builder
+  private ProxyGroupOption(groupName: string) {
+    Text(groupName).fontSize(13)
+      .fontWeight(this.selectedProxyGroup === groupName ? FontWeight.Bold : FontWeight.Regular)
+      .fontColor(this.selectedProxyGroup === groupName ? '#FFFFFF' : '#475569')
+      .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+      .backgroundColor(this.selectedProxyGroup === groupName ? '#2563EB' : '#FFFFFF').borderRadius(8)
+      .border({ width: 1, color: this.selectedProxyGroup === groupName ? '#2563EB' : '#DBE3EF' })
+      .onClick(() => { this.selectProxyGroup(groupName) })
   }
 
   @Builder
@@ -3331,6 +4347,22 @@ struct Index {
   }
 
   @Builder
+  private ReactiveSwitchRow(title: string, subtitle: string, switchKey: string) {
+    Row() {
+      Column() {
+        Text(title).fontSize(14).fontWeight(FontWeight.Medium).fontColor('#0F172A')
+        Text(subtitle).fontSize(12).fontColor('#64748B').margin({ top: 3 })
+      }
+      .alignItems(HorizontalAlign.Start).layoutWeight(1)
+      Text(this.isSwitchEnabled(switchKey) ? '开' : '关').fontSize(12).fontWeight(FontWeight.Bold)
+        .fontColor(this.isSwitchEnabled(switchKey) ? '#FFFFFF' : '#64748B')
+        .width(44).height(26).textAlign(TextAlign.Center)
+        .backgroundColor(this.isSwitchEnabled(switchKey) ? '#0F766E' : '#E2E8F0').borderRadius(13)
+    }
+    .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#E2E8F0' })
+  }
+
+  @Builder
   private LogLine(time: string, level: string, message: string) {
     Row({ space: 8 }) {
       Text(time).fontSize(11).fontColor('#64748B')
@@ -3349,91 +4381,288 @@ struct Index {
     .width('100%').padding(18).backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#E2E8F0' })
   }
 
-  // ============== HomeScreen ==============
+  // ============== HomeScreen (PC-aligned Hero + Active Nodes + Per-Node Traffic) ==============
   @Builder
   private HomeScreen() {
     Scroll() {
       Column({ space: 12 }) {
         this.HomeStatusCard()
-        if (this.liveConnected && (this.tailscaleAuthUrl.length > 0 || this.tailscaleState.length > 0 || this.tailscaleError.length > 0)) {
+        if (this.liveConnected && (this.tailscaleAuthUrl.length > 0 || this.tailscaleError.length > 0 || (this.tailscaleState.length > 0 && this.tailscaleState !== 'Running'))) {
           this.TailscaleStatusCard(true)
         }
-        this.HomeModeCard()
-        this.HomeCurrentRouteCard()
-        this.HomeRecentStatusCard()
+        if (this.liveConnected) {
+          this.HomeActiveNodesCard()
+          this.HomeNodeTrafficCard()
+        } else if (this.profileState.items.length === 0) {
+          Column({ space: 10 }) {
+            Text('快速开始（2 步搞定）').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#0F172A').width('100%')
+            Text('如果电脑端已经配好 BitzNet 订阅、自建节点与 AI 分流，可直接扫码同步，无需重复填写。')
+              .fontSize(12).fontColor('#475569').width('100%')
+            Row({ space: 8 }) {
+              Button('📷 扫码同步电脑').layoutWeight(1).height(38).fontSize(13).fontColor('#FFFFFF')
+                .backgroundColor('#2563EB').borderRadius(8)
+                .onClick(() => {
+                  this.currentTab = 'profiles';
+                  this.profileSubTab = 'list';
+                  this.scanQrSyncFromPc();
+                })
+              Button('前往导入配置').layoutWeight(1).height(38).fontSize(13).fontColor('#0F766E')
+                .backgroundColor('#E6FFFB').borderRadius(8)
+                .onClick(() => {
+                  this.currentTab = 'profiles';
+                  this.profileSubTab = 'list';
+                })
+            }
+            .width('100%')
+          }
+          .padding(14).backgroundColor('#FFFFFF').borderRadius(12).border({ width: 1, color: '#BFDBFE' })
+        }
       }
       .padding(16)
     }
+    .align(Alignment.TopStart)
     .layoutWeight(1)
   }
 
   @Builder
   private HomeStatusCard() {
-    Column({ space: 14 }) {
+    Column({ space: 12 }) {
       Row() {
-        Text(`版本 ${APP_VERSION_NAME}`)
-          .fontSize(13).fontWeight(FontWeight.Bold).fontColor('#334155')
-        Text(`更新 ${APP_BUILD_UPDATED_AT}`)
-          .fontSize(12).fontWeight(FontWeight.Medium).fontColor('#64748B')
-      }
-      .width('100%')
-      .justifyContent(FlexAlign.SpaceBetween)
-      .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-      .backgroundColor('#F8FAFC')
-      .borderRadius(8)
-      .border({ width: 1, color: '#E2E8F0' })
-
-      Row() {
-        Text(this.liveConnected ? '已连接' : '未连接')
-          .fontSize(12).fontWeight(FontWeight.Bold)
-          .fontColor(this.liveConnected ? '#0F766E' : '#D97706')
-          .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-          .backgroundColor(this.liveConnected ? '#E6FFFB' : '#FFF7ED')
-          .borderRadius(14)
-        Text(this.liveUptime)
-          .fontSize(12).fontWeight(FontWeight.Bold).fontColor('#2563EB')
-          .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-          .backgroundColor('#EFF6FF').borderRadius(14)
+        Row({ space: 6 }) {
+          Text(this.liveConnected ? '已连接' : '未连接')
+            .fontSize(13).fontWeight(FontWeight.Bold)
+            .fontColor(this.liveConnected ? '#FFFFFF' : '#D97706')
+            .padding({ left: 12, right: 12, top: 5, bottom: 5 })
+            .backgroundColor(this.liveConnected ? '#0F766E' : '#FFF7ED')
+            .borderRadius(14)
+          Text(this.liveUptime)
+            .fontSize(12).fontWeight(FontWeight.Medium).fontColor('#2563EB')
+            .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+            .backgroundColor('#EFF6FF').borderRadius(14)
+        }
+        Text(`${APP_VERSION_NAME}`).fontSize(11).fontColor('#64748B')
       }
       .width('100%').justifyContent(FlexAlign.SpaceBetween)
 
-      Button() {
-        Text(this.liveConnected ? '断开' : '连接')
-          .fontSize(24).fontWeight(FontWeight.Bold).fontColor('#FFFFFF')
-      }
-        .width(124).height(124).backgroundColor('#0F766E').borderRadius(62)
-        .onClick(() => { this.requestToggleVpn() })
+      // Prominent Hero Power Button (Emerald = Connect, Crimson = Disconnect)
+      Row({ space: 16 }) {
+        Button() {
+          Column({ space: 2 }) {
+            Text(this.liveConnected ? '断开' : '连接')
+              .fontSize(20).fontWeight(FontWeight.Bold).fontColor('#FFFFFF')
+            Text(this.liveConnected ? '点击停止' : '一键启动')
+              .fontSize(10).fontColor('#F8FAFC').opacity(0.9)
+          }
+        }
+          .width(96).height(96)
+          .backgroundColor(this.liveConnected ? '#DC2626' : '#0F766E')
+          .borderRadius(48)
+          .onClick(() => { this.requestToggleVpn() })
 
-      Row({ space: 8 }) {
-        Column() {
-          Text('下载').fontSize(12).fontColor('#64748B')
-          Text(this.liveDownloadSpeed).fontSize(16).fontWeight(FontWeight.Bold)
-            .fontColor('#0F172A').margin({ top: 4 })
+        Column({ space: 6 }) {
+          Text(this.liveProfileName)
+            .fontSize(15).fontWeight(FontWeight.Bold).fontColor('#0F172A').maxLines(1)
+          Text(this.liveConnected ? this.liveProxyName : '点击左侧按钮启动统一 VPN（代理 + AI自建 + Tailscale）')
+            .fontSize(12).fontColor(this.liveConnected ? '#0F766E' : '#64748B').maxLines(2)
+          if (this.tailscaleState === 'Running' && this.tailscaleIps.length > 0) {
+            Text(`Tailscale 已组网 · ${this.tailscaleIps}`)
+              .fontSize(11).fontWeight(FontWeight.Medium).fontColor('#2563EB').maxLines(1)
+          }
         }
-        .layoutWeight(1).padding(10).backgroundColor('#F8FAFC')
-        .borderRadius(8).border({ width: 1, color: '#E2E8F0' })
+        .alignItems(HorizontalAlign.Start).layoutWeight(1)
+      }
+      .width('100%').padding({ top: 4, bottom: 4 })
+
+      Row({ space: 6 }) {
+        this.ProxyModeOption('规则', 'rule')
+        this.ProxyModeOption('全局', 'global')
+        this.ProxyModeOption('直连', 'direct')
+      }
+      .width('100%').padding(4).backgroundColor('#EEF2F7').borderRadius(8)
+
+      Row({ space: 6 }) {
         Column() {
-          Text('上传').fontSize(12).fontColor('#64748B')
-          Text(this.liveUploadSpeed).fontSize(16).fontWeight(FontWeight.Bold)
-            .fontColor('#0F172A').margin({ top: 4 })
+          Text('下行').fontSize(11).fontColor('#64748B')
+          Text(this.liveDownloadSpeed).fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F766E').margin({ top: 2 }).maxLines(1)
         }
-        .layoutWeight(1).padding(10).backgroundColor('#F8FAFC')
-        .borderRadius(8).border({ width: 1, color: '#E2E8F0' })
+        .layoutWeight(1).padding(8).backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#E2E8F0' })
         Column() {
-          Text('连接').fontSize(12).fontColor('#64748B')
-          Text(`${this.liveConnections}`).fontSize(16).fontWeight(FontWeight.Bold)
-            .fontColor('#0F172A').margin({ top: 4 })
+          Text('上行').fontSize(11).fontColor('#64748B')
+          Text(this.liveUploadSpeed).fontSize(14).fontWeight(FontWeight.Bold).fontColor('#2563EB').margin({ top: 2 }).maxLines(1)
         }
-        .layoutWeight(1).padding(10).backgroundColor('#F8FAFC')
-        .borderRadius(8).border({ width: 1, color: '#E2E8F0' })
+        .layoutWeight(1).padding(8).backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#E2E8F0' })
+        Column() {
+          Text('连接').fontSize(11).fontColor('#64748B')
+          Text(`${this.liveConnections}`).fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A').margin({ top: 2 })
+        }
+        .layoutWeight(1).padding(8).backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#E2E8F0' })
+        Column() {
+          Text('延迟').fontSize(11).fontColor('#64748B')
+          Text(this.homePrimaryDelayText).fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A').margin({ top: 2 }).maxLines(1)
+        }
+        .layoutWeight(1).padding(8).backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#E2E8F0' })
       }
       .width('100%')
 
-      Text(this.statusMessage).width('100%').fontSize(12).fontColor('#475569').textAlign(TextAlign.Center)
+      Text(this.statusMessage).width('100%').fontSize(11).fontColor('#64748B').textAlign(TextAlign.Center)
       Text(`${this.liveRefreshToken}`).height(1).fontSize(1).fontColor('#FFFFFF').opacity(0)
     }
-    .alignItems(HorizontalAlign.Center).padding(14)
-    .backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+    .padding(14)
+    .backgroundColor(this.liveConnected ? '#F0FDFA' : '#FFFFFF')
+    .borderRadius(12)
+    .border({ width: this.liveConnected ? 1.5 : 1, color: this.liveConnected ? '#14B8A6' : '#DBE3EF' })
+  }
+
+  @Builder
+  private HomeActiveNodesCard() {
+    Column({ space: 8 }) {
+      Row() {
+        Text('🌐 当前出口节点与延迟').fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A')
+        Row({ space: 6 }) {
+          Button(this.isTestingActiveNodes ? '测速中...' : '⚡ 测延迟').height(28).fontSize(11).fontColor('#FFFFFF')
+            .backgroundColor(this.isTestingActiveNodes ? '#64748B' : '#0F766E').borderRadius(6)
+            .enabled(!this.isTestingActiveNodes)
+            .onClick(() => { this.testHomeActiveNodesDelay() })
+          Button('切换').height(28).fontSize(11).fontColor('#2563EB')
+            .backgroundColor('#EFF6FF').borderRadius(6)
+            .onClick(() => { this.currentTab = 'proxies' })
+        }
+      }
+      .width('100%').justifyContent(FlexAlign.SpaceBetween)
+
+      if (this.homeActiveNodes.length === 0) {
+        Text('正在同步策略组节点...').fontSize(12).fontColor('#64748B').width('100%')
+      } else {
+        ForEach(this.homeActiveNodes, (item: HomeActiveNodeItem) => {
+          Row({ space: 8 }) {
+            Column({ space: 2 }) {
+              Text(item.group).fontSize(11).fontColor('#64748B')
+              Text(item.finalNode).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F172A').maxLines(1)
+            }
+            .alignItems(HorizontalAlign.Start).layoutWeight(1)
+            Text(item.delay)
+              .fontSize(12).fontWeight(FontWeight.Bold)
+              .fontColor(this.delayAccentColor(item.status))
+              .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+              .backgroundColor(item.isAi ? '#CCFBF1' : item.isTs ? '#EFF6FF' : '#F1F5F9')
+              .borderRadius(10)
+          }
+          .width('100%').padding(10)
+          .backgroundColor(item.isAi ? '#F0FDFA' : '#F8FAFC')
+          .borderRadius(8)
+          .border({ width: 1, color: item.isAi ? '#99F6E4' : '#E2E8F0' })
+          .onClick(() => {
+            if (item.isTs) {
+              this.currentTab = 'tailscale';
+              this.refreshTailscaleStatus();
+            } else {
+              this.selectProxyGroup(item.group);
+              this.currentTab = 'proxies';
+            }
+          })
+        }, (item: HomeActiveNodeItem) => `han-${item.group}-${item.finalNode}-${item.delay}`)
+      }
+    }
+    .padding(12).backgroundColor('#FFFFFF').borderRadius(12).border({ width: 1, color: '#DBE3EF' })
+  }
+
+  @Builder
+  private HomeNodeTrafficCard() {
+    Column({ space: 8 }) {
+      Row() {
+        Text('📊 各节点实时流量').fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A')
+        Row({ space: 6 }) {
+          Button('清空').height(26).fontSize(11).fontColor('#64748B')
+            .backgroundColor('#F1F5F9').borderRadius(6)
+            .onClick(() => { this.resetHomeTrafficAccumulators() })
+          Button('详情').height(26).fontSize(11).fontColor('#2563EB')
+            .backgroundColor('#EFF6FF').borderRadius(6)
+            .onClick(() => {
+              this.currentTab = 'diagnostics';
+              this.diagSegment = '连接';
+            })
+        }
+      }
+      .width('100%').justifyContent(FlexAlign.SpaceBetween)
+
+      if (this.homeNodeTraffic.length === 0) {
+        Text('产生网络流量后自动按出口节点统计，点击任意节点可展开连接详情。')
+          .fontSize(11).fontColor('#64748B').width('100%')
+      } else {
+        Text('点击任意节点可展开/收起连接详情（支持同时展开多个节点）').fontSize(11).fontColor('#64748B').width('100%')
+        ForEach(this.homeNodeTraffic, (row: HomeNodeTrafficItem) => {
+          Column({ space: 6 }) {
+            Row({ space: 6 }) {
+              Text(this.isTrafficNodeExpanded(row.key) ? '▾' : '▸')
+                .fontSize(12).fontWeight(FontWeight.Bold)
+                .fontColor(this.isTrafficNodeExpanded(row.key) ? '#0F766E' : '#94A3B8')
+              Column({ space: 1 }) {
+                Text(row.node).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F172A').maxLines(1)
+                if (row.group.length > 0 && row.group !== row.node) {
+                  Text(row.group).fontSize(10).fontColor('#64748B').maxLines(1)
+                }
+              }
+              .alignItems(HorizontalAlign.Start).layoutWeight(1)
+
+              Text(row.active > 0 ? `${row.active} 活跃` : '最近')
+                .fontSize(10).fontWeight(FontWeight.Bold)
+                .fontColor(this.isTrafficNodeExpanded(row.key) ? '#FFFFFF' : row.active > 0 ? '#0F766E' : '#64748B')
+                .padding({ left: 7, right: 7, top: 3, bottom: 3 })
+                .backgroundColor(this.isTrafficNodeExpanded(row.key) ? '#0F766E' : row.active > 0 ? '#E6FFFB' : '#F1F5F9')
+                .borderRadius(10)
+
+              Text(`↓${this.formatBytes(row.downloadBytes)} / ↑${this.formatBytes(row.uploadBytes)}`)
+                .fontSize(11).fontColor('#475569')
+            }
+            .width('100%')
+
+            Row() {
+              Row().width(`${row.percent}%`).height(5).backgroundColor('#0F766E').borderRadius(3)
+            }
+            .width('100%').height(5).backgroundColor('#E2E8F0').borderRadius(3)
+
+            if (this.isTrafficNodeExpanded(row.key)) {
+              Column({ space: 6 }) {
+                Row() {
+                  Text(row.active > 0
+                    ? `当前活跃连接 (${this.getTrafficNodeConns(row.key).length})`
+                    : `最近连接记录 (${this.getTrafficNodeConns(row.key).length})`)
+                    .fontSize(11).fontWeight(FontWeight.Bold).fontColor('#0F766E').layoutWeight(1)
+                  Text('收起').fontSize(11).fontColor('#64748B')
+                }
+                .width('100%')
+
+                if (this.getTrafficNodeConns(row.key).length === 0) {
+                  Text('暂无连接明细').fontSize(11).fontColor('#64748B').width('100%')
+                } else {
+                  ForEach(this.getTrafficNodeConns(row.key), (cd: HomeNodeConnDetail, idx: number) => {
+                    Column({ space: 2 }) {
+                      Row({ space: 6 }) {
+                        Text(cd.target).fontSize(11).fontWeight(FontWeight.Medium).fontColor('#0F172A').maxLines(1).layoutWeight(1)
+                        Text(`↓${cd.download} / ↑${cd.upload}`).fontSize(10).fontWeight(FontWeight.Medium).fontColor('#0F766E')
+                      }
+                      .width('100%')
+                      Text(`${cd.rule}${cd.chain.length > 0 ? ` · ${cd.chain}` : ''}`)
+                        .fontSize(10).fontColor('#64748B').maxLines(1).width('100%')
+                    }
+                    .width('100%').padding({ top: 4, bottom: 4 })
+                    .border({ width: { bottom: idx < this.getTrafficNodeConns(row.key).length - 1 ? 1 : 0 }, color: '#E2E8F0' })
+                  }, (cd: HomeNodeConnDetail, idx: number) => `ec-${row.key}-${idx}-${cd.target}-${cd.download}-${cd.upload}`)
+                }
+              }
+              .width('100%').padding(8).backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#99F6E4' })
+            }
+          }
+          .width('100%')
+          .padding(8)
+          .backgroundColor(this.isTrafficNodeExpanded(row.key) ? '#F0FDFA' : '#FFFFFF')
+          .borderRadius(8)
+          .border({ width: 1, color: this.isTrafficNodeExpanded(row.key) ? '#14B8A6' : '#F1F5F9' })
+          .onClick(() => { this.toggleExpandTrafficNode(row.key) })
+        }, (row: HomeNodeTrafficItem) => `hnt-${row.key}-${row.active}-${row.downloadBytes}-${row.uploadBytes}-${this.isTrafficNodeExpanded(row.key) ? `open-${this.homeTrafficConnsTick}` : 'closed'}`)
+      }
+    }
+    .padding(12).backgroundColor('#FFFFFF').borderRadius(12).border({ width: 1, color: '#DBE3EF' })
   }
 
   @Builder
@@ -3508,24 +4737,21 @@ struct Index {
   private ProxyScreen() {
     Scroll() {
       Column({ space: 12 }) {
-        Row({ space: 6 }) {
-          this.ProxyModeOption('规则', 'rule')
-          this.ProxyModeOption('全局', 'global')
-          this.ProxyModeOption('直连', 'direct')
-        }
-        .padding(4).backgroundColor('#EEF2F7').borderRadius(8)
-
         TextInput({ placeholder: '搜索节点、地区或提供者', text: this.proxySearchText })
           .height(40).backgroundColor('#FFFFFF').borderRadius(8)
           .onChange((value: string) => { this.proxySearchText = value })
 
         if (this.proxyGroups.length > 0) {
-          Row({ space: 8 }) {
-            ForEach(this.proxyGroups, (group: ProxyGroupInfo) => {
-              Column() { this.GroupButton(group.name, this.selectedProxyGroup === group.name) }
-                .onClick(() => { this.selectProxyGroup(group.name) })
-            }, (group: ProxyGroupInfo) => group.name)
+          Scroll() {
+            Row({ space: 8 }) {
+              ForEach(this.proxyGroups, (group: ProxyGroupInfo) => {
+                this.ProxyGroupOption(group.name)
+              }, (group: ProxyGroupInfo) => group.name)
+            }
           }
+          .scrollable(ScrollDirection.Horizontal)
+          .scrollBar(BarState.Off)
+          .width('100%')
         } else {
           Row({ space: 8 }) {
             this.GroupButton('本地预览', true)
@@ -3613,43 +4839,24 @@ struct Index {
       }
       .padding(16)
     }
+    .align(Alignment.TopStart)
     .layoutWeight(1)
   }
 
-  // ============== ProfileScreen (Configs / Overlay / Editor / Traffic Flow) ==============
+  // ============== ProfileScreen (Configs / Editor / Traffic Flow) ==============
   @Builder
   private ProfileScreen() {
     Scroll() {
       Column({ space: 12 }) {
         Row({ space: 6 }) {
-          Column() { this.ModeButton('配置列表', this.profileSubTab === 'list') }
-            .layoutWeight(1).onClick(() => { this.profileSubTab = 'list' })
-          Column() { this.ModeButton('自建与AI', this.profileSubTab === 'overlay') }
-            .layoutWeight(1).onClick(() => {
-              this.profileSubTab = 'overlay';
-              this.loadOverlayConfig();
-            })
-          Column() { this.ModeButton('编辑', this.profileSubTab === 'editor') }
-            .layoutWeight(1).onClick(() => {
-              this.profileSubTab = 'editor';
-              if (this.editingProfileUid.length === 0 && this.profileState.currentUid.length > 0) {
-                this.loadProfileWorkspaceData(this.profileState.currentUid);
-              }
-            })
-          Column() { this.ModeButton('规则', this.profileSubTab === 'flow') }
-            .layoutWeight(1).onClick(() => {
-              this.profileSubTab = 'flow';
-              if (this.editingProfileUid.length === 0 && this.profileState.currentUid.length > 0) {
-                this.loadProfileWorkspaceData(this.profileState.currentUid);
-              }
-            })
+          this.ProfileSubTabOption('配置列表', 'list')
+          this.ProfileSubTabOption('编辑校验', 'editor')
+          this.ProfileSubTabOption('流量规则', 'flow')
         }
         .padding(4).backgroundColor('#EEF2F7').borderRadius(8)
 
         if (this.profileSubTab === 'list') {
           this.ProfileListAndVersionsSubScreen()
-        } else if (this.profileSubTab === 'overlay') {
-          this.ProfileOverlaySubScreen()
         } else if (this.profileSubTab === 'editor') {
           this.ProfileEditorSubScreen()
         } else {
@@ -3658,59 +4865,220 @@ struct Index {
       }
       .padding(16)
     }
+    .align(Alignment.TopStart)
     .layoutWeight(1)
   }
 
   @Builder
   private ProfileListAndVersionsSubScreen() {
     Column({ space: 12 }) {
+      // Primary 1-tap QR Sync from Windows PC
+      Button(this.isQrSyncing ? '正在同步电脑配置...' : '📷 扫码同步电脑配置（AI自建 + 分流 + 订阅）')
+        .width('100%').height(42).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#FFFFFF')
+        .backgroundColor(this.isQrSyncing ? '#64748B' : '#2563EB').borderRadius(10)
+        .enabled(!this.isQrSyncing)
+        .onClick(() => { this.scanQrSyncFromPc() })
+
+      if (this.qrSyncBanner.length > 0) {
+        Text(this.qrSyncBanner)
+          .fontSize(12).fontWeight(FontWeight.Medium).width('100%')
+          .fontColor(this.qrSyncBannerOk ? '#0F766E' : '#DC2626')
+          .padding(10).borderRadius(8)
+          .backgroundColor(this.qrSyncBannerOk ? '#F0FDFA' : '#FEF2F2')
+          .border({ width: 1, color: this.qrSyncBannerOk ? '#99F6E4' : '#FECACA' })
+      }
+
       Row({ space: 8 }) {
-        Button('导入订阅').layoutWeight(1).height(38).fontColor('#FFFFFF')
+        Button('+ 订阅链接').layoutWeight(1).height(36).fontSize(12).fontColor('#FFFFFF')
           .backgroundColor('#0F766E').borderRadius(8)
-          .onClick(() => { this.showImportPanel = !this.showImportPanel })
-        Button('本地文件').layoutWeight(1).height(38).fontColor('#0F172A')
+          .onClick(() => {
+            this.showClipboardPanel = false;
+            this.showImportPanel = !this.showImportPanel;
+          })
+        Button('本地文件').layoutWeight(1).height(36).fontSize(12).fontColor('#0F172A')
           .backgroundColor('#EEF2F7').borderRadius(8)
           .onClick(() => { this.importLocalFile() })
-        Button('剪贴板').layoutWeight(1).height(38).fontColor('#0F172A')
-          .backgroundColor('#EEF2F7').borderRadius(8)
-          .onClick(() => { this.importFromClipboard() })
+        Column() {
+          PasteButton({ text: PasteDescription.PASTE, buttonType: ButtonType.Normal })
+            .width('100%')
+            .height(36)
+            .fontSize(13)
+            .fontColor('#FFFFFF')
+            .backgroundColor('#475569')
+            .borderRadius(8)
+            .onClick((_event: ClickEvent, result: PasteButtonOnClickResult) => {
+              if (result === PasteButtonOnClickResult.SUCCESS) {
+                this.openClipboardImportPanel(true);
+              } else {
+                this.openClipboardImportPanel(false);
+                this.clipboardValidationChecked = true;
+                this.clipboardValidationOk = false;
+                this.clipboardValidationMessage = '系统未授予自动读取权限，请直接长按下方文本框手动粘贴后点「语法校验」';
+              }
+            })
+        }
+        .layoutWeight(1)
       }
 
       if (this.showImportPanel) { this.ImportPanel() }
 
-      Column({ space: 8 }) {
-        this.SectionTitle(`配置列表 · ${this.profileState.items.length}`, '全量更新')
-        if (this.profileState.items.length === 0) {
-          this.EmptyState('还没有配置', '先导入订阅或本地 YAML，即可开启版本管理、在线编辑与流量可视化。')
+      if (this.showClipboardPanel) {
+        Column({ space: 10 }) {
+          Row() {
+            Text('📋 剪贴板导入与语法校验').fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A').layoutWeight(1)
+            Button('关闭').height(26).fontSize(11).fontColor('#475569').backgroundColor('#F1F5F9').borderRadius(6)
+              .onClick(() => { this.showClipboardPanel = false })
+          }
+          .width('100%')
+
+          TextInput({ placeholder: '配置名称（可选，留空自动命名）', text: this.clipboardDraftName })
+            .height(38).fontSize(13).backgroundColor('#F8FAFC').borderRadius(8)
+            .onChange((val: string) => { this.clipboardDraftName = val })
+
+          TextArea({
+            text: this.clipboardDraftText,
+            placeholder: '已自动填入剪贴板内容（也可在此直接编辑或长按粘贴 Clash YAML / 订阅链接）'
+          })
+            .width('100%').height(180).fontSize(12).fontColor('#0F172A')
+            .backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#CBD5E1' })
+            .onChange((val: string) => {
+              this.clipboardDraftText = val;
+              this.clipboardValidationChecked = false;
+            })
+
+          if (this.clipboardValidationChecked) {
+            Column({ space: 3 }) {
+              Text(`${this.clipboardValidationOk ? '✓ ' : '✕ '}${this.clipboardValidationMessage}`)
+                .fontSize(12).fontWeight(FontWeight.Bold).width('100%')
+                .fontColor(this.clipboardValidationOk ? '#0F766E' : '#DC2626')
+              if (this.clipboardValidationStats.length > 0) {
+                Text(this.clipboardValidationStats).fontSize(11).fontColor('#334155').width('100%')
+              }
+            }
+            .width('100%').padding(8).borderRadius(8)
+            .backgroundColor(this.clipboardValidationOk ? '#F0FDFA' : '#FEF2F2')
+            .border({ width: 1, color: this.clipboardValidationOk ? '#99F6E4' : '#FECACA' })
+          }
+
+          Row({ space: 8 }) {
+            Button('语法校验').height(36).fontSize(12).fontColor('#2563EB')
+              .backgroundColor('#EFF6FF').borderRadius(8)
+              .onClick(() => { this.validateClipboardDraft() })
+
+            if (this.clipboardIsUrl) {
+              Button(this.isSavingClipboard ? '拉取中...' : '拉取并保存')
+                .layoutWeight(1).height(36).fontSize(12).fontWeight(FontWeight.Bold)
+                .fontColor('#FFFFFF')
+                .backgroundColor(this.isSavingClipboard ? '#64748B' : '#0F766E').borderRadius(8)
+                .enabled(!this.isSavingClipboard)
+                .onClick(() => { this.saveClipboardDraft(false) })
+            } else if (this.getCurrentActiveProfile()) {
+              Button(this.isSavingClipboard ? '保存中...' : '存为当前新版本')
+                .layoutWeight(1).height(36).fontSize(12).fontWeight(FontWeight.Bold)
+                .fontColor('#FFFFFF')
+                .backgroundColor(this.isSavingClipboard ? '#64748B' : '#0F766E').borderRadius(8)
+                .enabled(!this.isSavingClipboard)
+                .onClick(() => { this.saveClipboardDraft(true) })
+              Button('另存新配置')
+                .height(36).fontSize(12).fontColor('#0F172A')
+                .backgroundColor('#EEF2F7').borderRadius(8)
+                .enabled(!this.isSavingClipboard)
+                .onClick(() => { this.saveClipboardDraft(false) })
+            } else {
+              Button(this.isSavingClipboard ? '保存中...' : '校验通过并保存')
+                .layoutWeight(1).height(36).fontSize(12).fontWeight(FontWeight.Bold)
+                .fontColor('#FFFFFF')
+                .backgroundColor(this.isSavingClipboard ? '#64748B' : '#0F766E').borderRadius(8)
+                .enabled(!this.isSavingClipboard)
+                .onClick(() => { this.saveClipboardDraft(false) })
+            }
+          }
+          .width('100%')
+        }
+        .padding(12).backgroundColor('#FFFFFF').borderRadius(10).border({ width: 1.5, color: '#99F6E4' })
+      }
+
+      // Strictly show at most 2 cards: [Current Active] + optional [Pending Newly Imported]
+      Column({ space: 10 }) {
+        Row({ space: 8 }) {
+          Text(this.getPendingProfile() ? '配置管理（当前 + 待生效）' : '当前生效配置')
+            .fontSize(15).fontWeight(FontWeight.Bold).fontColor('#0F172A').layoutWeight(1)
+          if (this.profileState.items.length > 0) {
+            Text(this.updatingProfileUid === '__all__' ? '更新中...' : '全量更新')
+              .fontSize(12).fontColor('#2563EB')
+              .onClick(() => { this.updateAllProfiles() })
+            Text('清空配置')
+              .fontSize(12).fontColor('#DC2626')
+              .onClick(() => { this.showClearAllConfirm = !this.showClearAllConfirm })
+          }
+        }
+        .width('100%')
+
+        if (this.showClearAllConfirm && this.profileState.items.length > 0) {
+          Row({ space: 8 }) {
+            Text(`清空全部 ${this.profileState.items.length} 个配置与历史版本？`)
+              .fontSize(12).fontWeight(FontWeight.Medium).fontColor('#B91C1C').layoutWeight(1)
+            Button('取消').height(28).fontSize(11).fontColor('#475569').backgroundColor('#FFFFFF').borderRadius(6)
+              .onClick(() => { this.showClearAllConfirm = false })
+            Button('确认清空').height(28).fontSize(11).fontWeight(FontWeight.Bold).fontColor('#FFFFFF')
+              .backgroundColor('#DC2626').borderRadius(6)
+              .onClick(() => { this.clearAllProfiles() })
+          }
+          .width('100%').padding(8).backgroundColor('#FEF2F2').borderRadius(8).border({ width: 1, color: '#FECACA' })
+        }
+
+        if (!this.getCurrentActiveProfile()) {
+          this.EmptyState('还没有配置', '点击上方「📷 扫码同步电脑」或「+ 订阅链接」快速开始。')
         } else {
-          ForEach(this.profileState.items, (item: ClashProfile) => {
-            this.ProfileRow(item)
-          }, (item: ClashProfile) => `${item.uid}-${item.updatedAt}-${item.nodeCount}`)
+          this.CompactProfileCard(this.getCurrentActiveProfile()!, true)
+        }
+        if (this.getPendingProfile()) {
+          this.CompactProfileCard(this.getPendingProfile()!, false)
         }
       }
-      .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+      .padding(12).backgroundColor('#FFFFFF').borderRadius(10).border({ width: 1, color: '#DBE3EF' })
 
+      // Collapsible drawer 1: Other older saved profiles (hidden by default!)
+      if (this.getOtherSavedProfiles().length > 0) {
+        Column({ space: 8 }) {
+          Row() {
+            Text(`📁 其他历史配置 (${this.getOtherSavedProfiles().length})`).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#334155').layoutWeight(1)
+            Button(this.showOtherProfiles ? '收起' : '展开').height(28).fontSize(11)
+              .fontColor('#475569').backgroundColor('#F1F5F9').borderRadius(6)
+              .onClick(() => { this.showOtherProfiles = !this.showOtherProfiles })
+          }
+          .width('100%')
+
+          if (this.showOtherProfiles) {
+            ForEach(this.getOtherSavedProfiles(), (item: ClashProfile) => {
+              this.ProfileRow(item)
+            }, (item: ClashProfile) => `other-${item.uid}-${item.updatedAt}`)
+          }
+        }
+        .padding(12).backgroundColor('#FFFFFF').borderRadius(10).border({ width: 1, color: '#E2E8F0' })
+      }
+
+      // Collapsible drawer 2: Current profile immutable version history (hidden by default!)
       if (this.editingProfileUid.length > 0) {
         Column({ space: 8 }) {
           Row() {
             Column({ space: 2 }) {
-              Text(`版本历史 · ${this.editingProfileName}`).fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A')
-              Text(`当前激活 v${this.activeVersionNumber} · 共 ${this.versionHistory.length} 个快照（默认折叠以保持界面整洁）`)
-                .fontSize(11).fontColor('#64748B')
+              Text(`🕘 历史版本快照 · ${this.editingProfileName}`).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#334155')
+              Text(`当前 v${this.activeVersionNumber} · 共 ${this.versionHistory.length} 版（默认折叠）`).fontSize(11).fontColor('#64748B')
             }
             .alignItems(HorizontalAlign.Start).layoutWeight(1)
-            Button(this.showVersionHistory ? '收起历史' : `展开历史 (${this.versionHistory.length})`)
-              .height(30).fontSize(12)
+            Button(this.showVersionHistory ? '收起' : `展开 (${this.versionHistory.length})`)
+              .height(28).fontSize(11)
               .fontColor(this.showVersionHistory ? '#475569' : '#2563EB')
               .backgroundColor(this.showVersionHistory ? '#F1F5F9' : '#EFF6FF')
-              .borderRadius(8)
+              .borderRadius(6)
               .onClick(() => { this.showVersionHistory = !this.showVersionHistory })
           }
           .width('100%')
 
           if (this.showVersionHistory) {
             if (this.versionHistory.length === 0) {
-              this.EmptyState('暂无历史快照', '修改并保存配置后会自动生成不可变版本记录。')
+              this.EmptyState('暂无历史快照', '在线编辑并保存后会自动生成历史版本。')
             } else {
               ForEach(this.versionHistory, (ver: ProfileVersionEntry) => {
                 this.VersionHistoryRow(ver)
@@ -3718,23 +5086,90 @@ struct Index {
             }
           }
         }
-        .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+        .padding(12).backgroundColor('#FFFFFF').borderRadius(10).border({ width: 1, color: '#E2E8F0' })
       }
 
       if (this.showDiffPanel) {
         this.ProfileDiffCard()
       }
+    }
+  }
 
-      Column({ space: 10 }) {
-        this.SectionTitle('配置摘要', '')
-        Row({ space: 8 }) {
-          this.Metric('订阅', `${this.profileState.items.length}`)
-          this.Metric('节点', `${this.proxyNodes.length}`)
-          this.Metric('规则', `${this.trafficAnalysis.rules.length}`)
+  @Builder
+  private CompactProfileCard(item: ClashProfile, isActive: boolean) {
+    Column({ space: 8 }) {
+      Row({ space: 6 }) {
+        Column({ space: 2 }) {
+          Row({ space: 6 }) {
+            Text(item.name).fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A').maxLines(1).layoutWeight(1)
+          }
+          .width('100%')
+          Text(`${item.type === 'remote' ? '订阅' : '本地'} · ${item.nodeCount} 节点 · ${formatProfileUpdatedAt(item.updatedAt)}`)
+            .fontSize(11).fontColor('#64748B')
+          Row({ space: 6 }) {
+            if (isActive) {
+              Text(`当前生效 v${this.activeVersionNumber > 0 ? this.activeVersionNumber : 1}`)
+                .fontSize(10).fontWeight(FontWeight.Medium).fontColor('#0F766E')
+                .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+                .backgroundColor('#CCFBF1').borderRadius(8)
+            }
+            if (item.traffic.length > 0 && item.traffic !== '未知') {
+              Text(item.traffic).fontSize(11).fontColor('#0F766E')
+            }
+          }
+        }
+        .alignItems(HorizontalAlign.Start).layoutWeight(1)
+        if (isActive) {
+          Button(this.liveConnected ? '重启' : '启动')
+            .height(32).fontSize(12).fontWeight(FontWeight.Bold)
+            .fontColor('#FFFFFF')
+            .backgroundColor(this.liveConnected ? '#0F766E' : '#10B981')
+            .borderRadius(8)
+            .padding({ left: 14, right: 14 })
+            .onClick(() => { this.launchActiveProfileOnHome() })
+        } else {
+          this.Pill('待生效 · 新导入', '#2563EB', '#DBEAFE')
         }
       }
-      .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+      .width('100%')
+      .alignItems(VerticalAlign.Top)
+
+      if (isActive) {
+        Row({ space: 6 }) {
+          if (item.type === 'remote') {
+            Button(this.updatingProfileUid === item.uid ? '更新中...' : '更新订阅')
+              .layoutWeight(1).height(32).fontSize(12).fontColor('#FFFFFF')
+              .backgroundColor(this.updatingProfileUid === item.uid ? '#64748B' : '#0F766E').borderRadius(6)
+              .enabled(this.updatingProfileUid.length === 0)
+              .onClick(() => { this.updateProfile(item.uid) })
+          }
+          Button('编辑 YAML').layoutWeight(1).height(32).fontSize(12).fontColor('#0F766E')
+            .backgroundColor('#E6FFFB').borderRadius(6)
+            .onClick(() => { this.openProfileWorkspace(item.uid, 'editor', false) })
+          Button('流量规则').layoutWeight(1).height(32).fontSize(12).fontColor('#2563EB')
+            .backgroundColor('#EFF6FF').borderRadius(6)
+            .onClick(() => { this.openProfileWorkspace(item.uid, 'flow', false) })
+        }
+        .width('100%')
+      } else {
+        Row({ space: 8 }) {
+          Button('立即切换生效').layoutWeight(1).height(34).fontSize(12).fontColor('#FFFFFF')
+            .backgroundColor('#2563EB').borderRadius(6)
+            .onClick(() => { this.activateProfile(item.uid) })
+          Button('编辑查看').height(34).fontSize(12).fontColor('#334155')
+            .backgroundColor('#F1F5F9').borderRadius(6)
+            .onClick(() => { this.openProfileWorkspace(item.uid, 'editor', false) })
+          Button('删除').height(34).fontSize(12).fontColor('#DC2626')
+            .backgroundColor('#FEF2F2').borderRadius(6)
+            .onClick(() => { this.removeProfile(item.uid) })
+        }
+        .width('100%')
+      }
     }
+    .padding(12)
+    .backgroundColor(isActive ? '#F0FDFA' : '#EFF6FF')
+    .borderRadius(10)
+    .border({ width: 1.5, color: isActive ? '#14B8A6' : '#60A5FA' })
   }
 
   @Builder
@@ -3781,16 +5216,17 @@ struct Index {
       Column({ space: 10 }) {
         Row() {
           Text('🛡️ AI 严格走自建节点').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#0F172A').layoutWeight(1)
-          this.Pill(
-            this.overlayConfig.enabled ? `已启用 · ${this.overlayConfig.aiProviders.length} 家 AI` : '未启用',
-            this.overlayConfig.enabled ? '#0F766E' : '#64748B',
-            this.overlayConfig.enabled ? '#E6FFFB' : '#F1F5F9'
-          )
+          Text(this.overlayConfig.enabled ? `已启用 · ${this.overlayConfig.aiProviders.length} 家 AI` : '未启用')
+            .fontSize(12).fontWeight(FontWeight.Medium)
+            .fontColor(this.overlayConfig.enabled ? '#0F766E' : '#64748B')
+            .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+            .backgroundColor(this.overlayConfig.enabled ? '#E6FFFB' : '#F1F5F9')
+            .borderRadius(12)
         }
         .width('100%')
 
         Column() {
-          this.SwitchRow('启用 AI 严格自建保护', '默认 Fail-Closed：所选 AI 仅走自建出口，不可达直接断开（更新订阅永不覆盖）', this.overlayConfig.enabled)
+          this.ReactiveSwitchRow('启用 AI 严格自建保护', '默认 Fail-Closed：所选 AI 仅走自建出口，不可达直接断开（更新订阅永不覆盖）', 'overlay.enabled')
         }.onClick(() => { this.toggleOverlayEnabled() })
 
         Row() {
@@ -3848,11 +5284,11 @@ struct Index {
         if (this.showOverlayAdvanced) {
           Column({ space: 8 }) {
             Column() {
-              this.SwitchRow('启用 AI 严格分流规则', '关闭后仅注入自建节点与自定义规则', this.overlayConfig.aiStrictEnabled)
+              this.ReactiveSwitchRow('启用 AI 严格分流规则', '关闭后仅注入自建节点与自定义规则', 'overlay.aiStrictEnabled')
             }.onClick(() => { this.toggleOverlayAiStrict() })
 
             Column() {
-              this.SwitchRow('Fail-Closed 不可达直接断开', 'AI 组仅含自建节点（未填时 REJECT），绝不漏给国内或商业节点', this.overlayConfig.failClosed)
+              this.ReactiveSwitchRow('Fail-Closed 不可达直接断开', 'AI 组仅含自建节点（未填时 REJECT），绝不漏给国内或商业节点', 'overlay.failClosed')
             }.onClick(() => { this.toggleOverlayAiFailClosed() })
 
             Text('AI 策略组名称').fontSize(12).fontWeight(FontWeight.Medium).fontColor('#334155').width('100%')
@@ -3915,9 +5351,21 @@ struct Index {
             .onClick(() => { this.exportCrossPlatformBackup(true) })
         }
         .width('100%')
-        Button('从剪贴板导入迁移包 JSON').width('100%').height(36).fontSize(12).fontColor('#FFFFFF')
-          .backgroundColor('#2563EB').borderRadius(8)
-          .onClick(() => { this.importCrossPlatformBackupFromClipboard() })
+        PasteButton({ text: PasteDescription.PASTE, buttonType: ButtonType.Normal })
+          .width('100%')
+          .height(38)
+          .fontSize(13)
+          .fontColor('#FFFFFF')
+          .backgroundColor('#2563EB')
+          .borderRadius(8)
+          .onClick((_event: ClickEvent, result: PasteButtonOnClickResult) => {
+            if (result === PasteButtonOnClickResult.SUCCESS) {
+              this.importCrossPlatformBackupFromClipboard();
+            } else {
+              this.overlayBannerOk = false;
+              this.overlayBanner = '系统未授予剪贴板读取授权，请重试或使用「扫码同步电脑」';
+            }
+          })
       }
       .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
     }
@@ -4265,14 +5713,18 @@ struct Index {
 
           if (this.tailscaleAuthUrl.length > 0) {
             Column({ space: 8 }) {
-              Row() {
-                Text('需要浏览器授权登录').fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F766E')
-                Button('复制登录链接').height(28).fontSize(12).fontColor('#FFFFFF')
-                  .backgroundColor('#0F766E').borderRadius(6)
+              Text('需要浏览器授权登录').fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F766E').width('100%')
+              Row({ space: 8 }) {
+                Button('🌐 浏览器打开').layoutWeight(1).height(34).fontSize(12).fontWeight(FontWeight.Bold)
+                  .fontColor('#FFFFFF').backgroundColor('#0F766E').borderRadius(8)
+                  .onClick(() => { this.openTailscaleAuthUrlInBrowser() })
+                Button('复制链接').height(34).fontSize(12).fontWeight(FontWeight.Medium)
+                  .fontColor('#0F766E').backgroundColor('#FFFFFF').borderRadius(8)
+                  .border({ width: 1, color: '#14B8A6' })
                   .onClick(() => { this.copyTailscaleAuthUrl() })
               }
-              .width('100%').justifyContent(FlexAlign.SpaceBetween)
-              Text(this.tailscaleAuthUrl).fontSize(12).fontColor('#115E59').width('100%')
+              .width('100%')
+              Text(this.tailscaleAuthUrl).fontSize(11).fontColor('#115E59').width('100%')
                 .copyOption(CopyOptions.LocalDevice)
             }
             .padding(10).backgroundColor('#F0FDFA').borderRadius(8).border({ width: 1, color: '#99F6E4' })
@@ -4297,174 +5749,7 @@ struct Index {
         }
         .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
 
-        // 2. Decoupled Native Tailscale Preferences
-        Column({ space: 8 }) {
-          Text('Tailscale 原生配置（与 Mihomo YAML 解耦）').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#0F172A').width('100%')
-
-          Column() {
-            this.SwitchRow('App 接管 Tailscale 配置', '自动注入 Tailscale 出站，Mihomo YAML 仅需配置分流规则', this.tsPrefs.managedByApp)
-          }.onClick(() => { this.toggleTsManagedByApp() })
-
-          Column() {
-            this.SwitchRow('启用 Tailscale 出站', '开启后与 Mihomo 代理共享同一系统 VPN', this.tsPrefs.enabled)
-          }.onClick(() => { this.toggleTsEnabled() })
-
-          Column() {
-            this.SwitchRow('接受子网路由 (Accept Routes)', '访问对端广播的内网段（支持运行中热生效）', this.tsPrefs.acceptRoutes)
-          }.onClick(() => { this.toggleTsAcceptRoutes() })
-
-          Column() {
-            this.SwitchRow('自动注入 MagicDNS 与放行', '自动合并 *.ts.net DNS 策略及 fake-ip-filter', this.tsPrefs.autoInjectMagicDns)
-          }.onClick(() => { this.toggleTsAutoInjectDns() })
-
-          Column() {
-            this.SwitchRow('自动同步 SplitDNS 域名', '自动将后台 SplitDNS（如 sjfarm.cc）写入 DNS 策略、fake-ip 放行与分流规则，并保护直连子域名', this.tsPrefs.autoSyncSplitDns)
-          }.onClick(() => { this.toggleTsAutoSyncSplitDns() })
-
-          Column() {
-            this.SwitchRow('Exit Node 允许局域网访问', '使用 Exit Node 时保留本地局域网直连（热生效）', this.tsPrefs.exitNodeAllowLan)
-          }.onClick(() => { this.toggleTsExitNodeAllowLan() })
-
-          TextInput({ text: this.tsHostnameDraft, placeholder: '本机设备名 Hostname（默认 harmony-phone）' })
-            .height(38).fontSize(13).backgroundColor('#F8FAFC').borderRadius(8)
-            .onChange((val: string) => { this.tsHostnameDraft = val })
-
-          TextInput({ text: this.tsControlUrlDraft, placeholder: '自定义 Control URL（留空为官方，可填 Headscale）' })
-            .height(38).fontSize(13).backgroundColor('#F8FAFC').borderRadius(8)
-            .onChange((val: string) => { this.tsControlUrlDraft = val })
-
-          TextInput({ text: this.tsAuthKeyDraft, placeholder: '可选 Auth Key（留空则走交互式浏览器登录）' })
-            .height(38).fontSize(13).backgroundColor('#F8FAFC').borderRadius(8)
-            .onChange((val: string) => { this.tsAuthKeyDraft = val })
-
-          Button('保存并应用 Tailscale 设置').width('100%').height(38).fontSize(13).fontColor('#FFFFFF')
-            .backgroundColor('#0F766E').borderRadius(8)
-            .onClick(() => { this.saveTsTextSettings() })
-        }
-        .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
-
-        // 3. Exit Node Selector + Mihomo Linkage
-        Column({ space: 8 }) {
-          Row() {
-            Text('出口节点 (Exit Node)').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#0F172A')
-            this.Pill(this.tsPrefs.exitNode.length > 0 ? this.tsPrefs.exitNode : '未启用',
-              this.tsPrefs.exitNode.length > 0 ? '#0F766E' : '#64748B',
-              this.tsPrefs.exitNode.length > 0 ? '#E6FFFB' : '#F1F5F9')
-          }
-          .width('100%').justifyContent(FlexAlign.SpaceBetween)
-
-          Row({ space: 8 }) {
-            Button('关闭 Exit Node').layoutWeight(1).height(32).fontSize(12).fontColor('#475569')
-              .backgroundColor('#F1F5F9').borderRadius(6)
-              .onClick(() => { this.selectTsExitNode('') })
-            Button('将全部代理切至 Tailscale').layoutWeight(1).height(32).fontSize(12).fontColor('#2563EB')
-              .backgroundColor('#EFF6FF').borderRadius(6)
-              .onClick(() => { this.routeProxyViaTailscaleExitNode() })
-          }
-          .width('100%')
-
-          if (this.getExitNodeCandidates().length === 0) {
-            Text(this.tsControl.reachable ? '当前 Tailnet 暂无可用 Exit Node 节点' : '连接 VPN 后自动读取 Tailnet 可用 Exit Node')
-              .fontSize(12).fontColor('#64748B').width('100%')
-          } else {
-            ForEach(this.getExitNodeCandidates(), (peer: TailscalePeerItem) => {
-              Row() {
-                Column({ space: 2 }) {
-                  Text(peer.hostName).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F172A')
-                  Text(`${peer.tailscaleIPs.length > 0 ? peer.tailscaleIPs[0] : ''} · ${peer.online ? '在线' : '离线'}`)
-                    .fontSize(11).fontColor('#64748B')
-                }
-                .alignItems(HorizontalAlign.Start).layoutWeight(1)
-                Button(peer.exitNode ? '当前出口' : '选用').height(28).fontSize(12)
-                  .fontColor(peer.exitNode ? '#FFFFFF' : '#0F766E')
-                  .backgroundColor(peer.exitNode ? '#0F766E' : '#E6FFFB').borderRadius(6)
-                  .onClick(() => {
-                    if (peer.tailscaleIPs.length > 0) {
-                      this.selectTsExitNode(peer.tailscaleIPs[0]);
-                    }
-                  })
-              }
-              .width('100%').padding(8).backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#E2E8F0' })
-            }, (peer: TailscalePeerItem) => `exit-${peer.id}-${peer.exitNode ? '1' : '0'}`)
-          }
-        }
-        .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
-
-        // 4. Discovered Subnet Routes, MagicDNS & SplitDNS -> One-click Sync to Mihomo Rules
-        if (this.tsControl.advertisedRoutes.length > 0 || this.tsControl.magicDnsSuffix.length > 0 ||
-          this.tsControl.splitDns.length > 0 || this.tsPrefs.splitDnsDomains.length > 0) {
-          Column({ space: 8 }) {
-            Text('已发现子网、MagicDNS 与 SplitDNS（自动联动 Mihomo）').fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A').width('100%')
-            if (this.tsSplitDnsNeedReload) {
-              Row({ space: 8 }) {
-                Text('已同步最新 SplitDNS 域名到本地配置，请重连 VPN 使 DNS 策略生效。')
-                  .fontSize(12).fontColor('#B45309').layoutWeight(1)
-              }
-              .width('100%').padding(8).backgroundColor('#FFFBEB').borderRadius(8).border({ width: 1, color: '#FDE68A' })
-            }
-            if (this.tsControl.splitDns.length > 0) {
-              ForEach(this.tsControl.splitDns, (sd: TailscaleSplitDnsItem) => {
-                Row() {
-                  Column({ space: 2 }) {
-                    Text(`*.${sd.domain}`).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F172A')
-                    Text(`SplitDNS · 上游 ${sd.nameservers.length > 0 ? sd.nameservers.join(', ') : 'Tailscale 内置'}`)
-                      .fontSize(11).fontColor('#0F766E')
-                  }
-                  .alignItems(HorizontalAlign.Start).layoutWeight(1)
-                  Button('+ 写入配置').height(28).fontSize(11).fontColor('#0F766E')
-                    .backgroundColor('#E6FFFB').borderRadius(6)
-                    .onClick(() => { this.addSplitDnsToMihomoProfile(sd.domain) })
-                }
-                .width('100%').padding(8).backgroundColor('#F0FDFA').borderRadius(8).border({ width: 1, color: '#99F6E4' })
-              }, (sd: TailscaleSplitDnsItem) => `split-${sd.domain}`)
-            } else if (this.tsPrefs.splitDnsDomains.length > 0) {
-              Text(`已缓存 SplitDNS：${this.tsPrefs.splitDnsDomains.join(', ')}（启动 VPN 时自动注入）`)
-                .fontSize(12).fontColor('#0F766E').width('100%')
-            }
-            if (this.tsControl.magicDnsSuffix.length > 0) {
-              Row() {
-                Column({ space: 2 }) {
-                  Text(`*.${this.tsControl.magicDnsSuffix}`).fontSize(13).fontWeight(FontWeight.Medium).fontColor('#0F172A')
-                  Text('Tailnet MagicDNS 后缀').fontSize(11).fontColor('#64748B')
-                }
-                .alignItems(HorizontalAlign.Start).layoutWeight(1)
-                Button('+ 加分流规则').height(28).fontSize(11).fontColor('#0F766E')
-                  .backgroundColor('#E6FFFB').borderRadius(6)
-                  .onClick(() => { this.addTailnetSuffixToMihomoRules(this.tsControl.magicDnsSuffix) })
-              }
-              .width('100%').padding(8).backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#E2E8F0' })
-            }
-            ForEach(this.tsControl.advertisedRoutes, (rt: TailscaleAdvertisedRouteItem) => {
-              Row() {
-                Column({ space: 2 }) {
-                  Text(rt.cidr).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F172A')
-                  Text(`由 ${rt.peerName} (${rt.peerIp}) 广播 · ${rt.online ? '在线' : '离线'}`).fontSize(11).fontColor('#64748B')
-                }
-                .alignItems(HorizontalAlign.Start).layoutWeight(1)
-                Button('+ 加分流规则').height(28).fontSize(11).fontColor('#0F766E')
-                  .backgroundColor('#E6FFFB').borderRadius(6)
-                  .onClick(() => { this.addDiscoveredRouteToMihomoRules(rt.cidr) })
-              }
-              .width('100%').padding(8).backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#E2E8F0' })
-            }, (rt: TailscaleAdvertisedRouteItem) => `adv-${rt.cidr}-${rt.peerName}`)
-
-            Row({ space: 8 }) {
-              TextInput({ text: this.tsDnsTestQuery, placeholder: 'SplitDNS 诊断域名（如 dsh-10.sjfarm.cc）' })
-                .layoutWeight(1).height(34).fontSize(12).backgroundColor('#F8FAFC').borderRadius(6)
-                .onChange((val: string) => { this.tsDnsTestQuery = val })
-              Button('测试解析').height(34).fontSize(12).fontColor('#FFFFFF')
-                .backgroundColor('#2563EB').borderRadius(6)
-                .onClick(() => { this.runTailscaleDnsTest() })
-            }
-            .width('100%')
-            if (this.tsDnsTestResult.length > 0) {
-              Text(this.tsDnsTestResult).fontSize(12).fontColor('#0F766E').width('100%')
-            }
-          }
-          .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
-        }
-
-        // 5. Native Peers List with Live Ping
+        // 2. Native Peers List with Live Ping (HIGH PRIORITY — moved right under status!)
         Column({ space: 8 }) {
           Row() {
             Text(`设备列表 · ${this.tsControl.peers.length}`).fontSize(15).fontWeight(FontWeight.Bold).fontColor('#0F172A')
@@ -4530,10 +5815,190 @@ struct Index {
             }, (peer: TailscalePeerItem) => `peer-${peer.id}-${peer.online ? 'on' : 'off'}-${this.tsPingRefreshTick}`)
           }
         }
-        .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+        .padding(12).backgroundColor('#FFFFFF').borderRadius(10).border({ width: 1, color: '#DBE3EF' })
+
+        // 3. Discovered Subnet Routes, MagicDNS & SplitDNS -> One-click Sync to Mihomo Rules
+        if (this.tsControl.advertisedRoutes.length > 0 || this.tsControl.magicDnsSuffix.length > 0 ||
+          this.tsControl.splitDns.length > 0 || this.tsPrefs.splitDnsDomains.length > 0) {
+          Column({ space: 8 }) {
+            Text('SplitDNS 与子网分流（已自动联动 Mihomo）').fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A').width('100%')
+            if (this.tsSplitDnsNeedReload) {
+              Row({ space: 8 }) {
+                Text('已同步最新 SplitDNS 域名到本地配置，请重连 VPN 使 DNS 策略生效。')
+                  .fontSize(12).fontColor('#B45309').layoutWeight(1)
+              }
+              .width('100%').padding(8).backgroundColor('#FFFBEB').borderRadius(8).border({ width: 1, color: '#FDE68A' })
+            }
+            if (this.tsControl.splitDns.length > 0) {
+              ForEach(this.tsControl.splitDns, (sd: TailscaleSplitDnsItem) => {
+                Row() {
+                  Column({ space: 2 }) {
+                    Text(`*.${sd.domain}`).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F172A')
+                    Text(`SplitDNS · 上游 ${sd.nameservers.length > 0 ? sd.nameservers.join(', ') : 'Tailscale 内置'}`)
+                      .fontSize(11).fontColor('#0F766E')
+                  }
+                  .alignItems(HorizontalAlign.Start).layoutWeight(1)
+                  Button('+ 写入配置').height(28).fontSize(11).fontColor('#0F766E')
+                    .backgroundColor('#E6FFFB').borderRadius(6)
+                    .onClick(() => { this.addSplitDnsToMihomoProfile(sd.domain) })
+                }
+                .width('100%').padding(8).backgroundColor('#F0FDFA').borderRadius(8).border({ width: 1, color: '#99F6E4' })
+              }, (sd: TailscaleSplitDnsItem) => `split-${sd.domain}`)
+            } else if (this.tsPrefs.splitDnsDomains.length > 0) {
+              Text(`已同步 SplitDNS 分流域：${this.tsPrefs.splitDnsDomains.join(', ')}（启动 VPN 自动生效）`)
+                .fontSize(12).fontColor('#0F766E').width('100%')
+            }
+            if (this.tsControl.magicDnsSuffix.length > 0) {
+              Row() {
+                Column({ space: 2 }) {
+                  Text(`*.${this.tsControl.magicDnsSuffix}`).fontSize(13).fontWeight(FontWeight.Medium).fontColor('#0F172A')
+                  Text('Tailnet MagicDNS 后缀').fontSize(11).fontColor('#64748B')
+                }
+                .alignItems(HorizontalAlign.Start).layoutWeight(1)
+                Button('+ 加分流规则').height(28).fontSize(11).fontColor('#0F766E')
+                  .backgroundColor('#E6FFFB').borderRadius(6)
+                  .onClick(() => { this.addTailnetSuffixToMihomoRules(this.tsControl.magicDnsSuffix) })
+              }
+              .width('100%').padding(8).backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#E2E8F0' })
+            }
+            ForEach(this.tsControl.advertisedRoutes, (rt: TailscaleAdvertisedRouteItem) => {
+              Row() {
+                Column({ space: 2 }) {
+                  Text(rt.cidr).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F172A')
+                  Text(`由 ${rt.peerName} (${rt.peerIp}) 广播 · ${rt.online ? '在线' : '离线'}`).fontSize(11).fontColor('#64748B')
+                }
+                .alignItems(HorizontalAlign.Start).layoutWeight(1)
+                Button('+ 加分流规则').height(28).fontSize(11).fontColor('#0F766E')
+                  .backgroundColor('#E6FFFB').borderRadius(6)
+                  .onClick(() => { this.addDiscoveredRouteToMihomoRules(rt.cidr) })
+              }
+              .width('100%').padding(8).backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#E2E8F0' })
+            }, (rt: TailscaleAdvertisedRouteItem) => `adv-${rt.cidr}-${rt.peerName}`)
+
+            Row({ space: 8 }) {
+              TextInput({ text: this.tsDnsTestQuery, placeholder: 'SplitDNS 诊断域名（如 dsh-10.in.sjfarm.cc）' })
+                .layoutWeight(1).height(34).fontSize(12).backgroundColor('#F8FAFC').borderRadius(6)
+                .onChange((val: string) => { this.tsDnsTestQuery = val })
+              Button('测试解析').height(34).fontSize(12).fontColor('#FFFFFF')
+                .backgroundColor('#2563EB').borderRadius(6)
+                .onClick(() => { this.runTailscaleDnsTest() })
+            }
+            .width('100%')
+            if (this.tsDnsTestResult.length > 0) {
+              Text(this.tsDnsTestResult).fontSize(12).fontColor('#0F766E').width('100%')
+            }
+          }
+          .padding(12).backgroundColor('#FFFFFF').borderRadius(10).border({ width: 1, color: '#DBE3EF' })
+        }
+
+        // 4. Collapsible Low-Frequency Settings (Native Prefs + Exit Node)
+        Column({ space: 8 }) {
+          Row() {
+            Column({ space: 2 }) {
+              Text('⚙ 高级托管设置与 Exit Node').fontSize(14).fontWeight(FontWeight.Bold).fontColor('#334155')
+              Text(`设备名 ${this.tsPrefs.hostname} · 接管${this.tsPrefs.managedByApp ? '开' : '关'} · 子网${this.tsPrefs.acceptRoutes ? '开' : '关'}`)
+                .fontSize(11).fontColor('#64748B')
+            }
+            .alignItems(HorizontalAlign.Start).layoutWeight(1)
+            Button(this.showTsAdvancedSettings ? '收起' : '展开设置').height(28).fontSize(11)
+              .fontColor('#475569').backgroundColor('#F1F5F9').borderRadius(6)
+              .onClick(() => { this.showTsAdvancedSettings = !this.showTsAdvancedSettings })
+          }
+          .width('100%')
+
+          if (this.showTsAdvancedSettings) {
+            Column({ space: 8 }) {
+              Column() {
+                this.ReactiveSwitchRow('App 接管 Tailscale 配置', '自动注入 Tailscale 出站与分流规则', 'ts.managedByApp')
+              }.onClick(() => { this.toggleTsManagedByApp() })
+
+              Column() {
+                this.ReactiveSwitchRow('启用 Tailscale 出站', '开启后与 Mihomo 代理共享同一系统 VPN', 'ts.enabled')
+              }.onClick(() => { this.toggleTsEnabled() })
+
+              Column() {
+                this.ReactiveSwitchRow('接受子网路由 (Accept Routes)', '访问对端广播的内网段（支持运行中热生效）', 'ts.acceptRoutes')
+              }.onClick(() => { this.toggleTsAcceptRoutes() })
+
+              Column() {
+                this.ReactiveSwitchRow('自动注入 MagicDNS 与放行', '自动合并 *.ts.net DNS 策略及 fake-ip-filter', 'ts.autoInjectMagicDns')
+              }.onClick(() => { this.toggleTsAutoInjectDns() })
+
+              Column() {
+                this.ReactiveSwitchRow('自动同步 SplitDNS 域名', '自动将 SplitDNS 写入 DNS 策略、fake-ip 放行与分流规则', 'ts.autoSyncSplitDns')
+              }.onClick(() => { this.toggleTsAutoSyncSplitDns() })
+
+              Column() {
+                this.ReactiveSwitchRow('Exit Node 允许局域网访问', '使用 Exit Node 时保留本地局域网直连（热生效）', 'ts.exitNodeAllowLan')
+              }.onClick(() => { this.toggleTsExitNodeAllowLan() })
+
+              TextInput({ text: this.tsHostnameDraft, placeholder: '本机设备名 Hostname（默认 harmony-phone）' })
+                .height(38).fontSize(13).backgroundColor('#F8FAFC').borderRadius(8)
+                .onChange((val: string) => { this.tsHostnameDraft = val })
+
+              TextInput({ text: this.tsControlUrlDraft, placeholder: '自定义 Control URL（留空为官方，可填 Headscale）' })
+                .height(38).fontSize(13).backgroundColor('#F8FAFC').borderRadius(8)
+                .onChange((val: string) => { this.tsControlUrlDraft = val })
+
+              TextInput({ text: this.tsAuthKeyDraft, placeholder: '可选 Auth Key（留空则走交互式浏览器登录）' })
+                .height(38).fontSize(13).backgroundColor('#F8FAFC').borderRadius(8)
+                .onChange((val: string) => { this.tsAuthKeyDraft = val })
+
+              Button('保存并应用 Tailscale 设置').width('100%').height(38).fontSize(13).fontColor('#FFFFFF')
+                .backgroundColor('#0F766E').borderRadius(8)
+                .onClick(() => { this.saveTsTextSettings() })
+
+              Row() {
+                Text('出口节点 (Exit Node)').fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F172A')
+                Text(this.tsPrefs.exitNode.length > 0 ? this.tsPrefs.exitNode : '未启用')
+                  .fontSize(12).fontWeight(FontWeight.Medium)
+                  .fontColor(this.tsPrefs.exitNode.length > 0 ? '#0F766E' : '#64748B')
+                  .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+                  .backgroundColor(this.tsPrefs.exitNode.length > 0 ? '#E6FFFB' : '#F1F5F9')
+                  .borderRadius(12)
+              }
+              .width('100%').justifyContent(FlexAlign.SpaceBetween).margin({ top: 6 })
+
+              Row({ space: 8 }) {
+                Button('关闭 Exit Node').layoutWeight(1).height(32).fontSize(12).fontColor('#475569')
+                  .backgroundColor('#F1F5F9').borderRadius(6)
+                  .onClick(() => { this.selectTsExitNode('') })
+                Button('全部代理切至 Tailscale').layoutWeight(1).height(32).fontSize(12).fontColor('#2563EB')
+                  .backgroundColor('#EFF6FF').borderRadius(6)
+                  .onClick(() => { this.routeProxyViaTailscaleExitNode() })
+              }
+              .width('100%')
+
+              if (this.getExitNodeCandidates().length > 0) {
+                ForEach(this.getExitNodeCandidates(), (peer: TailscalePeerItem) => {
+                  Row() {
+                    Column({ space: 2 }) {
+                      Text(peer.hostName).fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F172A')
+                      Text(`${peer.tailscaleIPs.length > 0 ? peer.tailscaleIPs[0] : ''} · ${peer.online ? '在线' : '离线'}`)
+                        .fontSize(11).fontColor('#64748B')
+                    }
+                    .alignItems(HorizontalAlign.Start).layoutWeight(1)
+                    Button(peer.exitNode ? '当前出口' : '选用').height(28).fontSize(12)
+                      .fontColor(peer.exitNode ? '#FFFFFF' : '#0F766E')
+                      .backgroundColor(peer.exitNode ? '#0F766E' : '#E6FFFB').borderRadius(6)
+                      .onClick(() => {
+                        if (peer.tailscaleIPs.length > 0) {
+                          this.selectTsExitNode(peer.tailscaleIPs[0]);
+                        }
+                      })
+                  }
+                  .width('100%').padding(8).backgroundColor('#F8FAFC').borderRadius(8).border({ width: 1, color: '#E2E8F0' })
+                }, (peer: TailscalePeerItem) => `exit-${peer.id}-${peer.exitNode ? '1' : '0'}`)
+              }
+            }
+            .width('100%').padding({ top: 4 })
+          }
+        }
+        .padding(12).backgroundColor('#FFFFFF').borderRadius(10).border({ width: 1, color: '#E2E8F0' })
       }
       .padding(16)
     }
+    .align(Alignment.TopStart)
     .layoutWeight(1)
   }
 
@@ -4565,17 +6030,10 @@ struct Index {
     Scroll() {
       Column({ space: 12 }) {
         Row({ space: 6 }) {
-          Column() { this.ModeButton('连接', this.diagSegment === '连接') }
-            .layoutWeight(1).onClick(() => { this.diagSegment = '连接' })
-          Column() { this.ModeButton('日志', this.diagSegment === '日志') }
-            .layoutWeight(1).onClick(() => {
-              this.diagSegment = '日志';
-              this.refreshCoreLogs();
-            })
-          Column() { this.ModeButton('规则', this.diagSegment === '规则') }
-            .layoutWeight(1).onClick(() => { this.diagSegment = '规则' })
-          Column() { this.ModeButton('DNS', this.diagSegment === 'DNS') }
-            .layoutWeight(1).onClick(() => { this.diagSegment = 'DNS' })
+          this.DiagSegmentOption('连接', '连接')
+          this.DiagSegmentOption('日志', '日志')
+          this.DiagSegmentOption('规则', '规则')
+          this.DiagSegmentOption('DNS', 'DNS')
         }
         .padding(4).backgroundColor('#EEF2F7').borderRadius(8)
 
@@ -4591,6 +6049,7 @@ struct Index {
       }
       .padding(16)
     }
+    .align(Alignment.TopStart)
     .layoutWeight(1)
   }
 
@@ -4687,7 +6146,12 @@ struct Index {
       Row() {
         Row({ space: 8 }) {
           Text('Tailscale 状态').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#0F172A')
-          this.Pill(this.tailscaleStateLabel(), this.tailscaleStateColor(), this.tailscaleStateBgColor())
+          Text(this.tailscaleStateLabel())
+            .fontSize(12).fontWeight(FontWeight.Medium)
+            .fontColor(this.tailscaleStateColor())
+            .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+            .backgroundColor(this.tailscaleStateBgColor())
+            .borderRadius(12)
         }
         if (compact) {
           Button('管理').height(28).fontSize(12).fontColor('#0F766E')
@@ -4717,15 +6181,19 @@ struct Index {
 
       if (this.tailscaleAuthUrl.length > 0) {
         Column({ space: 8 }) {
-          Row() {
-            Text('Tailscale 交互式认证').fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F766E')
-            Button('复制登录链接').height(28).fontSize(12).fontColor('#FFFFFF')
-              .backgroundColor('#0F766E').borderRadius(6)
+          Text('Tailscale 交互式认证').fontSize(13).fontWeight(FontWeight.Bold).fontColor('#0F766E').width('100%')
+          Row({ space: 8 }) {
+            Button('🌐 浏览器打开').layoutWeight(1).height(34).fontSize(12).fontWeight(FontWeight.Bold)
+              .fontColor('#FFFFFF').backgroundColor('#0F766E').borderRadius(8)
+              .onClick(() => { this.openTailscaleAuthUrlInBrowser() })
+            Button('复制链接').height(34).fontSize(12).fontWeight(FontWeight.Medium)
+              .fontColor('#0F766E').backgroundColor('#FFFFFF').borderRadius(8)
+              .border({ width: 1, color: '#14B8A6' })
               .onClick(() => { this.copyTailscaleAuthUrl() })
           }
-          .width('100%').justifyContent(FlexAlign.SpaceBetween)
+          .width('100%')
           Text(this.tailscaleAuthUrl)
-            .fontSize(12).fontColor('#115E59').width('100%')
+            .fontSize(11).fontColor('#115E59').width('100%')
             .copyOption(CopyOptions.LocalDevice)
         }
         .padding(10).backgroundColor('#F0FDFA').borderRadius(8).border({ width: 1, color: '#99F6E4' })
@@ -4871,6 +6339,7 @@ struct Index {
       }
       .padding(16)
     }
+    .align(Alignment.TopStart)
     .layoutWeight(1)
   }
 
@@ -5329,6 +6798,11 @@ struct Index {
       return this.tsControl.tailnetName.length > 0
         ? `${this.tsControl.tailnetName} · ${this.tsControl.peers.length} 设备`
         : '内嵌 Tailscale 原生管理'
+    }
+    if (this.currentTab === 'overlay') {
+      return this.overlayConfig.enabled
+        ? `AI 严格自建已启用 · ${this.overlayConfig.aiProviders.length} 家 AI`
+        : '自建节点与 Fail-Closed 分流覆写'
     }
     if (this.currentTab === 'profiles') { return `${this.profileState.items.length} 个配置 · 版本管理与流量规则` }
     if (this.currentTab === 'diagnostics') {

@@ -285,6 +285,23 @@
     gap: 2px;
   }
   .conn-pop-row:last-child { border-bottom: none; }
+  .qr-modal-backdrop {
+    position: fixed; inset: 0; z-index: 1500;
+    background: rgba(2,6,23,.76);
+    display: none; align-items: center; justify-content: center;
+    padding: 16px;
+  }
+  .qr-modal-backdrop.open { display: flex; }
+  .qr-modal {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 16px; padding: 22px; width: 460px; max-width: 100%;
+    box-shadow: 0 20px 50px rgba(0,0,0,.6);
+  }
+  .qr-img-wrap {
+    background: #ffffff; padding: 14px; border-radius: 12px;
+    display: inline-flex; align-items: center; justify-content: center;
+    margin: 12px auto;
+  }
 </style>
 </head>
 <body>
@@ -315,6 +332,7 @@
           <button data-mode="global">全局</button>
           <button data-mode="direct">直连</button>
         </div>
+        <button class="btn btn-blue" id="btnTopQrSync">📱 扫码同步到手机</button>
         <button class="btn btn-primary" id="btnToggleCore">启动核心</button>
         <button class="btn" id="btnRestartCore">重启</button>
       </div>
@@ -711,12 +729,16 @@
       </div>
 
       <div class="card">
-        <h3><span>🔄 双端配置备份与迁移（Windows ↔ 鸿蒙互通 JSON）</span></h3>
-        <div class="muted" style="margin-bottom:12px;">一键导出/导入自建节点、已选 AI 厂商、Tailscale 配置与订阅列表，方便在笔记本与鸿蒙手机之间同步。</div>
+        <h3><span>📱 手机扫码同步 & 双端迁移（Windows ↔ 鸿蒙）</span></h3>
+        <div class="muted" style="margin-bottom:12px;">
+          推荐直接扫码同步：仅平移<b>自建节点、已选 AI 厂商、Tailscale 流量分流路由（SplitDNS / 子网路由）与订阅配置</b>；<br/>
+          <b>不会覆盖</b>手机的设备名、Tailscale 登录态与 Exit Node（手机扫码后独立浏览器授权即可）。
+        </div>
         <div class="actions">
+          <button class="btn btn-primary" id="btnOpenQrSync">📱 生成手机扫码同步二维码</button>
           <button class="btn btn-blue" id="btnExportFull">导出完整迁移包 (.json)</button>
           <button class="btn" id="btnExportSanitized">导出脱敏分享包 (.json)</button>
-          <label class="btn btn-primary" style="display:inline-flex;align-items:center;cursor:pointer;">
+          <label class="btn" style="display:inline-flex;align-items:center;cursor:pointer;">
             导入迁移包 (.json)
             <input type="file" id="inpImportBundle" accept=".json" style="display:none;" />
           </label>
@@ -818,6 +840,32 @@
 
 <div id="toast" class="toast"></div>
 <div id="connPopover" class="conn-popover"></div>
+<div id="qrSyncBackdrop" class="qr-modal-backdrop">
+  <div class="qr-modal">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+      <h3 style="margin:0;font-size:16px;">📱 手机扫码同步配置</h3>
+      <button class="btn btn-sm" id="btnCloseQrSync">关闭</button>
+    </div>
+    <div id="qrSyncSummary" class="muted" style="margin-top:8px;">正在生成临时局域网同步会话...</div>
+    <div style="text-align:center;">
+      <div class="qr-img-wrap">
+        <img id="qrSyncImg" width="224" height="224" alt="同步二维码" style="display:block;" />
+      </div>
+    </div>
+    <div class="field" style="margin-top:4px;">
+      <label>电脑局域网网卡 IP（请确保手机与电脑连在同一 Wi-Fi）</label>
+      <div class="inline-form">
+        <select id="qrSyncIpSel"></select>
+        <button class="btn btn-sm" id="btnRefreshQrSync" style="white-space:nowrap;">重新生成</button>
+      </div>
+    </div>
+    <div id="qrSyncStatusBox" class="alert ok" style="display:none;margin-top:8px;"></div>
+    <div class="muted" style="font-size:11px;margin-top:6px;">
+      打开鸿蒙手机 Clash Harmony →「配置」页 → 点击 <b>📷 扫码同步电脑</b> 扫描上方二维码。<br/>
+      临时链接 5 分钟后自动关闭，仅同步代理/AI/Tailscale 分流路由，不同步电脑设备名与登录凭据。
+    </div>
+  </div>
+</div>
 
 <script>
 let currentTab = 'overview';
@@ -2256,6 +2304,60 @@ document.getElementById('btnCloseAllConns').addEventListener('click', async () =
   const { ok } = await api('/clash/connections', { method: 'DELETE' });
   toast(ok ? '已断开全部活跃连接' : '操作失败', !ok);
   setTimeout(loadOverviewConnections, 400);
+});
+
+// ================= LAN QR SYNC MODAL (PC -> HARMONYOS PHONE) =================
+let qrSyncPollTimer = null;
+
+async function openQrSyncModal(preferredIp) {
+  const backdrop = document.getElementById('qrSyncBackdrop');
+  const statusBox = document.getElementById('qrSyncStatusBox');
+  backdrop.classList.add('open');
+  statusBox.style.display = 'none';
+  document.getElementById('qrSyncSummary').textContent = '正在启动临时局域网同步服务并生成二维码...';
+
+  const { ok, data } = await api('/api/sync/create', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ preferredIp: preferredIp || '' })
+  });
+  if (!ok || !data.ok) {
+    document.getElementById('qrSyncSummary').textContent = '生成失败：' + (data.error || '未知错误');
+    toast(data.error || '生成同步二维码失败', true);
+    return;
+  }
+  document.getElementById('qrSyncSummary').textContent = data.summary || '请使用鸿蒙手机 Clash Harmony 扫码';
+  document.getElementById('qrSyncImg').src = data.qrDataUrl || '';
+  const sel = document.getElementById('qrSyncIpSel');
+  sel.innerHTML = (data.lanIps || []).map(ip => `<option value="${esc(ip)}" ${ip === data.selectedIp ? 'selected' : ''}>${esc(ip)}:${data.port}</option>`).join('');
+
+  clearInterval(qrSyncPollTimer);
+  qrSyncPollTimer = setInterval(async () => {
+    if (!backdrop.classList.contains('open')) {
+      clearInterval(qrSyncPollTimer);
+      return;
+    }
+    const r = await api('/api/sync/status');
+    if (r.ok && r.data && r.data.syncedCount > 0) {
+      statusBox.style.display = 'block';
+      statusBox.textContent = `✅ 手机已成功拉取配置（${r.data.syncedCount} 次）！可在手机端点击「立即生效」并独立登录 Tailscale。`;
+    }
+  }, 1500);
+}
+
+async function closeQrSyncModal() {
+  clearInterval(qrSyncPollTimer);
+  document.getElementById('qrSyncBackdrop').classList.remove('open');
+  await api('/api/sync/close', { method: 'POST' });
+}
+
+document.getElementById('btnTopQrSync').addEventListener('click', () => openQrSyncModal(''));
+document.getElementById('btnOpenQrSync').addEventListener('click', () => openQrSyncModal(''));
+document.getElementById('btnCloseQrSync').addEventListener('click', closeQrSyncModal);
+document.getElementById('btnRefreshQrSync').addEventListener('click', () => openQrSyncModal(document.getElementById('qrSyncIpSel').value));
+document.getElementById('qrSyncIpSel').addEventListener('change', (e) => openQrSyncModal(e.target.value));
+document.getElementById('qrSyncBackdrop').addEventListener('click', (e) => {
+  if (e.target.id === 'qrSyncBackdrop') closeQrSyncModal();
 });
 
 // Initial load & live polling
