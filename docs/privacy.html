@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Clash Harmony 隐私政策</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #475569;
+      --accent: #0f766e;
+      --border: #e2e8f0;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px 16px 48px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "HarmonyOS Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.75;
+    }
+    .container {
+      max-width: 820px;
+      margin: 0 auto;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 28px 24px;
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
+    }
+    h1 { font-size: 24px; margin: 0 0 8px; color: var(--accent); }
+    .meta { font-size: 13px; color: var(--muted); margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+    h2 { font-size: 17px; margin: 24px 0 10px; color: var(--text); }
+    p, li { font-size: 14px; color: #334155; }
+    ul { padding-left: 20px; margin: 8px 0; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+    th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; }
+    th { background: #f1f5f9; color: var(--text); }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .box {
+      background: #f0fdfa;
+      border: 1px solid #99f6e4;
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 13px;
+      color: #115e59;
+      margin: 14px 0;
+    }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <h1>Clash Harmony 隐私政策</h1>
+    <div class="meta">
+      <div>应用名称：Clash Harmony（包名：<code>com.sjfarmltd.tailscale</code>）</div>
+      <div>开发者：sjfarmltd &nbsp;|&nbsp; 联系邮箱：<a href="mailto:songjiao001@gmail.com">songjiao001@gmail.com</a></div>
+      <div>更新与生效日期：2026 年 11 月 26 日</div>
+    </div>
+
+    <div class="box">
+      <strong>核心承诺：</strong>Clash Harmony 是一款本地化运行的网络分流与异地组网工具。我们<strong>不运营账号服务器、不收集您的浏览记录或流量内容、不集成广告或第三方统计追踪 SDK</strong>。您的配置文件、节点信息及组网状态仅保存在您本机应用沙箱中。
+    </div>
+
+    <h2>一、我们如何收集与使用信息</h2>
+    <p>为实现本应用的核心网络路由与异地组网功能，应用仅在本地处理以下必要信息，且不会向开发者上传：</p>
+    <ul>
+      <li><strong>网络配置与策略文件：</strong>您主动通过订阅链接、本地文件、剪贴板或局域网扫码导入的 YAML 配置文件、自定义分流规则与自建节点配置，仅用于本地核心解析与路由转发。</li>
+      <li><strong>Tailscale 组网状态：</strong>当您主动启用内嵌 Tailscale 组网时，设备密钥与节点状态（<code>tailscaled.state</code>）保存在本地沙箱；交互式登录及组网通信由您的设备直接与您指定的 Tailscale 官方控制面或自建 Headscale 服务器完成，开发者无法获取您的登录凭据。</li>
+      <li><strong>本地运行日志与连接诊断：</strong>为便于您排查网络故障，应用会在本地记录核心运行日志及当前活跃连接统计；您可随时清理或卸载应用彻底删除。</li>
+    </ul>
+
+    <h2>二、设备权限说明</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>权限 / 系统能力</th>
+          <th>使用目的</th>
+          <th>是否上传开发者</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>网络访问（<code>ohos.permission.INTERNET</code>）</td>
+          <td>建立网络分流连接、更新您配置的远程订阅、连接 Tailscale 组网节点</td>
+          <td>否</td>
+        </tr>
+        <tr>
+          <td>获取网络状态（<code>ohos.permission.GET_NETWORK_INFO</code>）</td>
+          <td>感知 Wi-Fi/移动网络切换，实现网络恢复与组网重连自愈</td>
+          <td>否</td>
+        </tr>
+        <tr>
+          <td>获取应用包信息（<code>ohos.permission.GET_BUNDLE_INFO</code>）</td>
+          <td>在创建系统 VPN 通道时将本应用加入分流排除列表，避免流量回环</td>
+          <td>否</td>
+        </tr>
+        <tr>
+          <td>后台长时任务（<code>ohos.permission.KEEP_BACKGROUND_RUNNING</code>）</td>
+          <td>在您主动开启 VPN 连接后保持后台网络服务稳定运行</td>
+          <td>否</td>
+        </tr>
+        <tr>
+          <td>系统 VPN 扩展能力（<code>VpnExtensionAbility</code>）</td>
+          <td>创建本地虚拟网卡（TUN）以按您的规则接管并转发网络流量</td>
+          <td>否</td>
+        </tr>
+        <tr>
+          <td>系统扫码能力（<code>ScanKit</code>）</td>
+          <td>仅在您主动点击「扫码同步电脑」时调用系统扫码界面读取局域网同步二维码</td>
+          <td>否</td>
+        </tr>
+        <tr>
+          <td>剪贴板安全控件（<code>PasteButton</code>）</td>
+          <td>仅在您主动点击「粘贴」按钮并经系统临时授权后读取一次剪贴板文本用于导入校验</td>
+          <td>否</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>三、数据存储、安全与共享</h2>
+    <ul>
+      <li><strong>本地存储：</strong>所有配置、历史版本快照、覆写规则与组网状态均存储于 HarmonyOS 应用专属私有沙箱目录，系统级隔离保护，其他应用无法访问。</li>
+      <li><strong>不共享、不转让、不公开披露：</strong>我们不会向任何第三方出售、共享或转让您的个人信息。仅当您主动启用 Tailscale 或远程订阅拉取时，设备会直接与您所填写的目标服务地址建立网络连接。</li>
+    </ul>
+
+    <h2>四、您的隐私权利</h2>
+    <p>您对本地数据拥有完全控制权，可随时查阅、修改、导出或清空全部配置，或通过系统设置撤回相关权限。详情请查阅 <a href="./privacy-rights.html">《Clash Harmony 隐私权利说明》</a>。</p>
+
+    <h2>五、未成年人保护</h2>
+    <p>本应用主要面向具备完全民事行为能力的成年开发者与网络管理人员。我们不会主动收集未成年人的个人信息。</p>
+
+    <h2>六、隐私政策更新与联系我们</h2>
+    <p>如本政策发生变更，我们将通过本页面发布最新版本并更新生效日期。若您对本隐私政策有任何疑问或建议，请通过邮箱 <a href="mailto:songjiao001@gmail.com">songjiao001@gmail.com</a> 联系我们，我们将在 15 个工作日内予以回复。</p>
+  </main>
+</body>
+</html>

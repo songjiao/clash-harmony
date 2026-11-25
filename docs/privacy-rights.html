@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Clash Harmony 隐私权利说明</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #475569;
+      --accent: #0f766e;
+      --border: #e2e8f0;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px 16px 48px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "HarmonyOS Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.75;
+    }
+    .container {
+      max-width: 820px;
+      margin: 0 auto;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 28px 24px;
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
+    }
+    h1 { font-size: 24px; margin: 0 0 8px; color: var(--accent); }
+    .meta { font-size: 13px; color: var(--muted); margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+    h2 { font-size: 17px; margin: 22px 0 8px; color: var(--text); }
+    p, li { font-size: 14px; color: #334155; }
+    ul { padding-left: 20px; margin: 8px 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .card {
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin: 12px 0;
+    }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <h1>Clash Harmony 隐私权利说明</h1>
+    <div class="meta">
+      <div>应用名称：Clash Harmony（包名：<code>com.sjfarmltd.tailscale</code>）</div>
+      <div>开发者：sjfarmltd &nbsp;|&nbsp; 隐私政策：<a href="./privacy.html">查看完整隐私政策</a></div>
+      <div>更新日期：2026 年 11 月 26 日</div>
+    </div>
+
+    <p>依据《中华人民共和国个人信息保护法》及相关隐私保护规范，您对 Clash Harmony 涉及的所有数据享有以下权利。由于本应用采用<strong>纯本地沙箱架构、不设开发者云端账号与服务端存储</strong>，您可以直接在设备本地即时行使以下全部权利：</p>
+
+    <div class="card">
+      <h2>1. 查阅与复制权（访问您的数据）</h2>
+      <ul>
+        <li>打开应用左上角菜单 <strong>「订阅与配置」→「编辑校验」</strong>，可查看当前生效及历史版本的全部配置内容。</li>
+        <li>打开 <strong>「自建与分流覆写」</strong>，可查看已保存的自建节点与分流规则，并可一键导出完整版或脱敏版 JSON 配置包。</li>
+        <li>打开 <strong>「日志与诊断」</strong>，可随时查看本地运行日志、规则与连接状态。</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>2. 更正与补充权</h2>
+      <ul>
+        <li>您可随时在 <strong>「订阅与配置」</strong> 中编辑并校验 YAML 配置，在 <strong>「自建与分流覆写」</strong> 或 <strong>「Tailscale 组网」</strong> 中修改节点名称、路由策略与各项开关。</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>3. 删除权与账号登出</h2>
+      <ul>
+        <li><strong>删除单个或全部配置：</strong>在 <strong>「订阅与配置」→「配置列表」</strong> 中点击 <strong>「清空配置」</strong>，即可立即删除全部配置文件与所有历史版本快照。</li>
+        <li><strong>登出 Tailscale 节点：</strong>在 <strong>「Tailscale 组网」</strong> 页面点击 <strong>「登出切换账号」</strong>，即可注销当前节点授权。</li>
+        <li><strong>彻底清除所有本地数据：</strong>在系统设置中清除本应用数据或卸载应用，设备沙箱内的全部文件（配置、日志、组网状态）将被操作系统永久清除。</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>4. 撤回同意与权限管理</h2>
+      <ul>
+        <li>您可随时在应用首页点击 <strong>「断开」</strong> 立即终止 VPN 通道与后台保活任务。</li>
+        <li>您也可在 HarmonyOS <strong>「系统设置」→「应用和元服务」→「Clash Harmony」→「权限」</strong> 中随时关闭或管理相关权限。</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>5. 隐私咨询与权利请求渠道</h2>
+      <p>如您在行使上述权利过程中遇到任何问题，或需要进一步协助，请发送邮件至：<a href="mailto:songjiao001@gmail.com">songjiao001@gmail.com</a>。</p>
+      <p>我们将核验您的请求并在 <strong>15 个工作日内</strong> 给予书面回复。</p>
+    </div>
+  </main>
+</body>
+</html>
