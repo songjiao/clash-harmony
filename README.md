@@ -2,7 +2,9 @@
 
 在 HarmonyOS 7 (`API 23`, `arm64-v8a`) 单 VPN 限制下，将 **patched Tailscale**（含 OpenHarmony 自愈补丁）作为 **Mihomo (`Meta v1.19.34`)** 原生出站整合为同一个系统 VPN 客户端，实现公网规则分流、Fake-IP DNS 与 Tailscale 内网/子网路由同时在线。
 
-> **AI 接手 / 本地笔记本开发必读**：架构细节、相对上游的全部修改清单、USB `hdc` 真机调试流程、已知踩坑与待验证清单均整理在 **[AGENTS.md](AGENTS.md)**。
+> **AI 接手 / 本地开发必读**：
+> - 鸿蒙端与仓库详细改动、USB `hdc` 真机调试与排障红线：**[AGENTS.md](AGENTS.md)**
+> - **macOS / Android / Linux / iOS 跨平台开发与移植指南**：**[docs/CROSS_PLATFORM_GUIDE.md](docs/CROSS_PLATFORM_GUIDE.md)**
 
 ## 主要特性
 
