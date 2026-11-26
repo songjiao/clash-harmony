@@ -465,7 +465,9 @@ func parseSSURI(raw string, idx int) (map[string]any, error) {
 		}
 		body = body[:hIdx]
 	}
+	queryPart := ""
 	if qIdx := strings.IndexByte(body, '?'); qIdx >= 0 {
+		queryPart = body[qIdx+1:]
 		body = body[:qIdx]
 	}
 	var method, password, server string
@@ -511,7 +513,7 @@ func parseSSURI(raw string, idx int) (map[string]any, error) {
 	if server == "" || port <= 0 {
 		return nil, fmt.Errorf("ss 缺少服务器地址或端口")
 	}
-	return map[string]any{
+	m := map[string]any{
 		"name":     name,
 		"type":     "ss",
 		"server":   server,
@@ -519,7 +521,14 @@ func parseSSURI(raw string, idx int) (map[string]any, error) {
 		"cipher":   method,
 		"password": password,
 		"udp":      true,
-	}, nil
+	}
+	if pName, pOpts := parseSSPluginQuery(queryPart); pName != "" {
+		m["plugin"] = pName
+		if len(pOpts) > 0 {
+			m["plugin-opts"] = pOpts
+		}
+	}
+	return m, nil
 }
 
 func parseVMessURI(raw string, idx int) (map[string]any, error) {
@@ -1038,6 +1047,7 @@ type BackupProfileRecord struct {
 	Name      string `json:"name"`
 	URL       string `json:"url,omitempty"`
 	FetchMode string `json:"fetchMode,omitempty"`
+	UserAgent string `json:"userAgent,omitempty"`
 	Content   string `json:"content,omitempty"`
 }
 
@@ -1068,6 +1078,7 @@ func BuildBackupBundle(store *DataStore, sanitize bool) ConfigBackupBundle {
 			Name:      p.Name,
 			URL:       p.URL,
 			FetchMode: p.FetchMode,
+			UserAgent: p.UserAgent,
 		}
 		if sanitize {
 			rec.URL = sanitizeURLSecrets(rec.URL)

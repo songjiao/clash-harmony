@@ -16,7 +16,17 @@ func main() {
 	headlessFlag := flag.Bool("headless", false, "无系统托盘模式运行（适合命令行/调试）")
 	noBrowserFlag := flag.Bool("no-browser", false, "启动后不自动打开浏览器控制台")
 	enableTunFlag := flag.Bool("enable-tun", false, "启动时开启 TUN 全局接管（配合管理员提权使用）")
+	trayOnlyFlag := flag.Bool("tray-only", false, "仅启动系统托盘伴侣图标并连接后台系统服务")
 	flag.Parse()
+
+	if *trayOnlyFlag {
+		uiAddr := strings.TrimSpace(*uiAddrFlag)
+		if uiAddr == "" {
+			uiAddr = defaultUIAddr
+		}
+		_ = RunRemoteTray("http://" + uiAddr)
+		return
+	}
 
 	store, err := NewDataStore(*dataDirFlag)
 	if err != nil {
@@ -36,10 +46,26 @@ func main() {
 	}
 	uiURL := "http://" + uiAddr
 
-	// Single-instance check: if already running, just pop open the Web Console and exit.
+	inService := isRunningAsWindowsService()
+	if inService {
+		*headlessFlag = true
+		*noBrowserFlag = true
+	}
+
+	// Single-instance check: if already running (including as Windows Service), open the Web Console and exit.
+	if !inService {
+		if isAddrAlreadyListening(uiAddr) {
+			if !*noBrowserFlag {
+				_ = OpenBrowser(uiURL)
+			}
+			return
+		}
+	}
 	releaseLock, isPrimary := AcquireSingleInstance()
 	if !isPrimary {
-		_ = OpenBrowser(uiURL)
+		if !inService && !*noBrowserFlag {
+			_ = OpenBrowser(uiURL)
+		}
 		return
 	}
 	defer releaseLock()
@@ -52,6 +78,9 @@ func main() {
 	}
 
 	engine := NewDesktopEngine(store)
+	if inService {
+		engine.SetServiceMode(true)
+	}
 	var tray *TrayApp
 	var server *DesktopServer
 
@@ -63,6 +92,9 @@ func main() {
 	}
 
 	relaunchAdmin := func(enableTun bool) {
+		if inService {
+			return
+		}
 		args := []string{}
 		if strings.TrimSpace(*dataDirFlag) != "" {
 			args = append(args, "-data", *dataDirFlag)
@@ -85,20 +117,34 @@ func main() {
 		os.Exit(0)
 	}
 
-	server = NewDesktopServer(store, engine, relaunchAdmin)
-	boundAddr, err := server.Start(uiAddr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "start UI server failed: %v\n", err)
-		os.Exit(1)
-	}
-	uiURL = "http://" + boundAddr
-
-	// Auto-start core if enabled and a profile already exists.
-	if settings.AutoStartCore && (settings.ActiveProfileID != "" || len(store.ListProfiles()) > 0) {
-		// If TUN was saved as true but launched without admin, fall back gracefully to non-TUN or leave error visible.
-		if err := engine.Start(); err != nil {
-			fmt.Fprintf(os.Stderr, "auto-start core warning: %v\n", err)
+	startCoreAndServer := func() error {
+		server = NewDesktopServer(store, engine, relaunchAdmin)
+		boundAddr, err := server.Start(uiAddr)
+		if err != nil {
+			return fmt.Errorf("start UI server failed: %w", err)
 		}
+		uiURL = "http://" + boundAddr
+
+		// Auto-start core if enabled and a profile already exists.
+		if settings.AutoStartCore && (settings.ActiveProfileID != "" || len(store.ListProfiles()) > 0) {
+			if err := engine.Start(); err != nil {
+				fmt.Fprintf(os.Stderr, "auto-start core warning: %v\n", err)
+			}
+		}
+		return nil
+	}
+
+	if inService {
+		if err := runWindowsService(startCoreAndServer, shutdown); err != nil {
+			fmt.Fprintf(os.Stderr, "windows service error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if err := startCoreAndServer(); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
 	}
 
 	if !*noBrowserFlag {

@@ -24,3 +24,7 @@ func (t *TrayApp) Run() error {
 	<-t.done
 	return nil
 }
+
+func RunRemoteTray(uiURL string) error {
+	return nil
+}

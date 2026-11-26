@@ -5,6 +5,7 @@ export interface ClashProfile {
   type: ProfileType;
   name: string;
   source: string;
+  userAgent?: string;
   filePath: string;
   updatedAt: number;
   nodeCount: number;
@@ -23,13 +24,14 @@ export function createEmptyProfileState(): ProfileState {
   };
 }
 
-export function createRemoteProfile(name: string, url: string): ClashProfile {
+export function createRemoteProfile(name: string, url: string, userAgent: string = ''): ClashProfile {
   const now: number = Date.now();
   return {
     uid: `remote_${now}`,
     type: 'remote',
     name: name,
     source: url,
+    userAgent: userAgent.replace(/[\r\n]/g, '').trim(),
     filePath: '',
     updatedAt: now,
     nodeCount: 0,

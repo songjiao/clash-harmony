@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"strings"
 	"testing"
@@ -537,5 +540,104 @@ rules:
 	gotAddr := cfg.General.Tun.Inet4Address[0].Addr()
 	if gotAddr.String() != "198.18.0.1" {
 		t.Fatalf("expected Wintun local IPv4 198.18.0.1, got %s (prefix=%s)", gotAddr, cfg.General.Tun.Inet4Address[0])
+	}
+}
+
+func TestFetchSubscription_UsesCustomAndDefaultUserAgent(t *testing.T) {
+	var gotUA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("mode: rule\nproxies:\n  - { name: Demo, type: ss, server: 1.2.3.4, port: 443, cipher: aes-128-gcm, password: secret }\nrules:\n  - MATCH,DIRECT\n"))
+	}))
+	defer srv.Close()
+
+	// Empty userAgent falls back to defaultSubscriptionUserAgent
+	if _, err := FetchSubscription(srv.URL, "direct", "", 0); err != nil {
+		t.Fatalf("FetchSubscription default UA failed: %v", err)
+	}
+	if gotUA != defaultSubscriptionUserAgent {
+		t.Fatalf("expected default UA %q, got %q", defaultSubscriptionUserAgent, gotUA)
+	}
+
+	// Custom userAgent is sent verbatim (stripped of CR/LF and whitespace)
+	if _, err := FetchSubscription(srv.URL, "direct", "  MyCustomClient/1.0\r\n ", 0); err != nil {
+		t.Fatalf("FetchSubscription custom UA failed: %v", err)
+	}
+	if gotUA != "MyCustomClient/1.0" {
+		t.Fatalf("expected custom UA %q, got %q", "MyCustomClient/1.0", gotUA)
+	}
+
+	// Verify DataStore persistence, UpdateProfileSource, and MobileSyncBundle carry UserAgent
+	store, err := NewDataStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewDataStore failed: %v", err)
+	}
+	sampleYAML := "mode: rule\nproxies:\n  - { name: Demo, type: ss, server: 1.2.3.4, port: 443, cipher: aes-128-gcm, password: secret }\nrules:\n  - MATCH,DIRECT\n"
+	meta, err := store.SaveProfileContent("", "TestSub", srv.URL, "direct", "InitialUA/1.0", sampleYAML, nil)
+	if err != nil {
+		t.Fatalf("SaveProfileContent failed: %v", err)
+	}
+	if meta.UserAgent != "InitialUA/1.0" {
+		t.Fatalf("expected saved UserAgent InitialUA/1.0, got %q", meta.UserAgent)
+	}
+	updated, err := store.UpdateProfileSource(meta.ID, "TestSub", srv.URL, "auto", "UpdatedUA/2.0")
+	if err != nil {
+		t.Fatalf("UpdateProfileSource failed: %v", err)
+	}
+	if updated.UserAgent != "UpdatedUA/2.0" {
+		t.Fatalf("expected updated UserAgent UpdatedUA/2.0, got %q", updated.UserAgent)
+	}
+	bundle := BuildMobileSyncBundle(store)
+	if len(bundle.Profiles) != 1 || bundle.Profiles[0].UserAgent != "UpdatedUA/2.0" {
+		t.Fatalf("expected MobileSyncBundle to preserve UserAgent, got %+v", bundle.Profiles)
+	}
+}
+
+func TestNormalizeFetchedSubscription_HandlesBase64URIsAndBase64YAMLAndErrors(t *testing.T) {
+	// 1. Base64-encoded mixed share URI list (previously failed on line 3 with "mapping values are not allowed")
+	uriList := strings.Join([]string{
+		"ss://" + base64.StdEncoding.EncodeToString([]byte("aes-128-gcm:pass123")) + "@hk1.example.com:443?plugin=simple-obfs%3Bobfs%3Dhttp%3Bobfs-host%3Dcdn.example.com#HK-01",
+		"trojan://secretpass@jp1.example.com:443?sni=jp1.example.com#JP-01",
+	}, "\n")
+	b64URIs := base64.StdEncoding.EncodeToString([]byte(uriList))
+	yamlOut, converted, err := NormalizeFetchedSubscription(b64URIs)
+	if err != nil {
+		t.Fatalf("NormalizeFetchedSubscription(b64URIs) failed: %v", err)
+	}
+	if !converted {
+		t.Fatalf("expected converted=true for Base64 URI list")
+	}
+	merged, err := BuildRuntimeYAMLWithOverlay(yamlOut, defaultCustomOverlay(), defaultTailscalePrefs(), defaultAppSettings())
+	if err != nil {
+		t.Fatalf("BuildRuntimeYAMLWithOverlay failed: %v", err)
+	}
+	if val := validateConfigYAML(merged); !val.OK {
+		t.Fatalf("merged YAML from Base64 URI list invalid: %s\n%s", val.Error, merged)
+	}
+
+	// 2. Base64-encoded Clash YAML
+	sampleYAML := "mode: rule\nproxies:\n  - { name: Demo, type: ss, server: 1.2.3.4, port: 443, cipher: aes-128-gcm, password: secret }\nrules:\n  - MATCH,DIRECT\n"
+	b64YAML := base64.StdEncoding.EncodeToString([]byte(sampleYAML))
+	decodedYAML, converted2, err := NormalizeFetchedSubscription(b64YAML)
+	if err != nil || !converted2 || !strings.Contains(decodedYAML, "proxies:") {
+		t.Fatalf("Base64 Clash YAML decode failed: converted=%v err=%v", converted2, err)
+	}
+
+	// 3. Clash YAML with UTF-8 BOM
+	bomYAML, converted3, err := NormalizeFetchedSubscription("\xef\xbb\xbf" + sampleYAML)
+	if err != nil || converted3 || strings.HasPrefix(bomYAML, "\xef\xbb\xbf") {
+		t.Fatalf("BOM Clash YAML failed: converted=%v err=%v", converted3, err)
+	}
+
+	// 4. HTML / JSON / Surge INI error bodies produce clear errors
+	if _, _, err := NormalizeFetchedSubscription("<!DOCTYPE html><html><body>Just a moment...</body></html>"); err == nil || !strings.Contains(err.Error(), "HTML") {
+		t.Fatalf("expected HTML error, got: %v", err)
+	}
+	if _, _, err := NormalizeFetchedSubscription(`{"message":"token expired"}`); err == nil || !strings.Contains(err.Error(), "token expired") {
+		t.Fatalf("expected JSON message error, got: %v", err)
+	}
+	if _, _, err := NormalizeFetchedSubscription("#!MANAGED-CONFIG https://example.com\n[General]\nloglevel = notify\n[Proxy]\nHK = ss, 1.2.3.4, 443\n"); err == nil || !strings.Contains(err.Error(), "Surge") {
+		t.Fatalf("expected Surge INI error, got: %v", err)
 	}
 }

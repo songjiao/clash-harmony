@@ -769,6 +769,41 @@
             <tbody id="profilesBody"><tr><td colspan="4" class="muted">暂无配置</td></tr></tbody>
           </table>
         </div>
+
+        <div id="subMetaCard" style="display:none;margin-top:14px;padding:14px;border-radius:10px;border:1px solid #38bdf8;background:#0b1220;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+            <b style="color:#7dd3fc;">编辑订阅设置（URL / 拉取方式 / 自定义 User-Agent）</b>
+            <button class="btn btn-sm" id="btnCloseSubMeta">关闭</button>
+          </div>
+          <input type="hidden" id="editSubId" value="" />
+          <div class="grid">
+            <div class="field">
+              <label>配置名称</label>
+              <input type="text" id="editSubName" placeholder="配置名称" />
+            </div>
+            <div class="field">
+              <label>拉取方式</label>
+              <select id="editSubFetchMode">
+                <option value="auto">自动（优先直连，失败自动走代理）</option>
+                <option value="direct">直连拉取</option>
+                <option value="proxy">走当前代理拉取</option>
+              </select>
+            </div>
+          </div>
+          <div class="field">
+            <label>订阅地址 (URL)</label>
+            <input type="text" id="editSubUrl" placeholder="https://..." />
+          </div>
+          <div class="field">
+            <label>自定义 User-Agent（可选，留空恢复默认 clash-verge/v2.3.0 mihomo/1.19.34）</label>
+            <input type="text" id="editSubUserAgent" placeholder="留空使用默认 clash-verge/v2.3.0 mihomo/1.19.34" />
+          </div>
+          <div id="editSubStatus" class="muted" style="margin-bottom:8px;"></div>
+          <div class="actions">
+            <button class="btn" id="btnSaveSubMeta">仅保存设置</button>
+            <button class="btn btn-primary" id="btnSaveAndRefreshSubMeta">保存并立即更新订阅</button>
+          </div>
+        </div>
       </div>
 
       <div class="grid">
@@ -776,7 +811,7 @@
           <h3><span>导入订阅链接 (URL)</span></h3>
           <div class="field">
             <label>配置名称</label>
-            <input type="text" id="impUrlName" placeholder="例如: BitzNet 原始订阅" />
+            <input type="text" id="impUrlName" placeholder="例如: 我的 Clash 订阅" />
           </div>
           <div class="field">
             <label>Clash / Mihomo YAML 订阅地址</label>
@@ -786,9 +821,13 @@
             <label>拉取方式（解决国内/海外订阅 IP 限制）</label>
             <select id="impFetchMode">
               <option value="auto">自动（优先直连，失败自动走代理）</option>
-              <option value="direct">直连拉取（BitzNet 等防境外 IP 订阅推荐）</option>
+              <option value="direct">直连拉取（国内可直连订阅推荐）</option>
               <option value="proxy">走当前代理拉取（海外订阅推荐）</option>
             </select>
+          </div>
+          <div class="field">
+            <label>自定义 User-Agent（可选，留空默认 clash-verge）</label>
+            <input type="text" id="impUserAgent" placeholder="留空默认 clash-verge/v2.3.0 mihomo/1.19.34" />
           </div>
           <div id="impUrlStatus" class="muted" style="margin-bottom:8px;"></div>
           <button class="btn btn-primary" id="btnImpUrl">下载、融合预校验并启用</button>
@@ -1527,20 +1566,24 @@ function formatFetchModeBadge(mode) {
   return `<span class="badge">${esc(mode)}</span>`;
 }
 
+let profilesCache = [];
+
 async function loadProfiles() {
   const { ok, data } = await api('/api/profiles');
   if (!ok) return;
   const tbody = document.getElementById('profilesBody');
   const list = data.profiles || [];
+  profilesCache = list;
   if (list.length === 0) {
     tbody.innerHTML = '<tr><td colspan="4" class="muted">尚未导入配置，请在下方导入订阅链接或本地 YAML 文件</td></tr>';
     return;
   }
   tbody.innerHTML = list.map(p => {
     const active = p.id === data.activeId;
+    const uaBadge = p.userAgent ? `<span class="badge">UA: ${esc(p.userAgent)}</span>` : '';
     return `<tr>
       <td>
-        <b>${esc(p.name)}</b> ${active ? '<span class="badge ok">当前生效</span>' : ''} ${p.url ? formatFetchModeBadge(p.fetchMode) : ''}
+        <b>${esc(p.name)}</b> ${active ? '<span class="badge ok">当前生效</span>' : ''} ${p.url ? formatFetchModeBadge(p.fetchMode) : ''} ${uaBadge}
         <div class="muted mono">${esc(p.url || '本地 YAML')}</div>
         ${formatUserinfoBadge(p.userinfo)}
       </td>
@@ -1550,13 +1593,74 @@ async function loadProfiles() {
         <div class="actions">
           ${!active ? `<button class="btn btn-primary btn-sm" onclick="activateProfile('${esc(p.id)}')">启用</button>` : ''}
           ${p.url ? `<button class="btn btn-sm" onclick="refreshProfile('${esc(p.id)}', this)">更新</button>` : ''}
-          <button class="btn btn-sm" onclick="editProfile('${esc(p.id)}')">编辑</button>
+          <button class="btn btn-sm" onclick="openSubMetaEditor('${esc(p.id)}')">订阅设置</button>
+          <button class="btn btn-sm" onclick="editProfile('${esc(p.id)}')">编辑 YAML</button>
           <button class="btn btn-danger btn-sm" onclick="deleteProfile('${esc(p.id)}')">删除</button>
         </div>
       </td>
     </tr>`;
   }).join('');
 }
+
+function openSubMetaEditor(id) {
+  const p = profilesCache.find(item => item.id === id);
+  if (!p) { toast('未找到该配置', true); return; }
+  document.getElementById('editSubId').value = p.id;
+  document.getElementById('editSubName').value = p.name || '';
+  document.getElementById('editSubUrl').value = p.url || '';
+  document.getElementById('editSubFetchMode').value = p.fetchMode || 'auto';
+  document.getElementById('editSubUserAgent').value = p.userAgent || '';
+  document.getElementById('editSubStatus').textContent = '';
+  const card = document.getElementById('subMetaCard');
+  card.style.display = 'block';
+  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+document.getElementById('btnCloseSubMeta').addEventListener('click', () => {
+  document.getElementById('subMetaCard').style.display = 'none';
+});
+
+async function submitSubMetaEditor(refreshNow) {
+  const id = document.getElementById('editSubId').value.trim();
+  const name = document.getElementById('editSubName').value.trim();
+  const url = document.getElementById('editSubUrl').value.trim();
+  const fetchMode = document.getElementById('editSubFetchMode').value || 'auto';
+  const userAgent = document.getElementById('editSubUserAgent').value.trim();
+  const statusEl = document.getElementById('editSubStatus');
+  if (!id) return;
+  if (refreshNow && !url) {
+    toast('请先填写订阅 URL 再更新', true);
+    return;
+  }
+  const btnSave = document.getElementById('btnSaveSubMeta');
+  const btnRef = document.getElementById('btnSaveAndRefreshSubMeta');
+  btnSave.disabled = true;
+  btnRef.disabled = true;
+  statusEl.style.color = '#94a3b8';
+  statusEl.textContent = refreshNow ? '正在保存设置并使用新 User-Agent 拉取订阅...' : '正在保存设置...';
+  const { ok, data } = await api('/api/profiles/meta', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, name, url, fetchMode, userAgent, refresh: !!refreshNow })
+  });
+  btnSave.disabled = false;
+  btnRef.disabled = false;
+  if (ok) {
+    statusEl.style.color = '#6ee7b7';
+    statusEl.textContent = data.refreshed
+      ? '设置已保存，订阅已更新并通过融合预校验！'
+      : '订阅设置已保存（下次手动或定时更新时生效）';
+    toast(data.refreshed ? '设置已保存并更新订阅成功' : '订阅设置已保存');
+    loadProfiles(); loadState();
+  } else {
+    statusEl.style.color = '#fca5a5';
+    statusEl.textContent = data.error || '保存失败';
+    toast(data.error || '保存失败', true);
+    loadProfiles();
+  }
+}
+
+document.getElementById('btnSaveSubMeta').addEventListener('click', () => submitSubMetaEditor(false));
+document.getElementById('btnSaveAndRefreshSubMeta').addEventListener('click', () => submitSubMetaEditor(true));
 
 document.getElementById('selAutoUpdate').addEventListener('change', async (e) => {
   const hours = parseInt(e.target.value, 10) || 0;
@@ -1607,6 +1711,7 @@ document.getElementById('btnImpUrl').addEventListener('click', async () => {
   const name = document.getElementById('impUrlName').value.trim();
   const url = document.getElementById('impUrl').value.trim();
   const fetchMode = document.getElementById('impFetchMode').value || 'auto';
+  const userAgent = document.getElementById('impUserAgent').value.trim();
   const statusEl = document.getElementById('impUrlStatus');
   if (!url) { toast('请输入订阅 URL', true); return; }
   const btn = document.getElementById('btnImpUrl');
@@ -1615,7 +1720,7 @@ document.getElementById('btnImpUrl').addEventListener('click', async () => {
   statusEl.textContent = '正在下载订阅并进行融合预校验...';
   const { ok, data } = await api('/api/profiles/import', {
     method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ name, url, fetchMode, activate: true })
+    body: JSON.stringify({ name, url, fetchMode, userAgent, activate: true })
   });
   btn.disabled = false;
   if (ok) {
@@ -1623,6 +1728,7 @@ document.getElementById('btnImpUrl').addEventListener('click', async () => {
     statusEl.textContent = `导入成功：${data.profile ? data.profile.name : ''}（${data.profile ? data.profile.proxyCount : 0} 节点，融合校验通过）`;
     toast('订阅导入成功');
     document.getElementById('impUrl').value = '';
+    document.getElementById('impUserAgent').value = '';
     loadProfiles(); loadState();
   } else {
     statusEl.style.color = '#fca5a5';

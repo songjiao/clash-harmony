@@ -18,12 +18,13 @@ import (
 )
 
 const (
-	appVersion              = "v2.4.2-win"
-	defaultControllerAddr   = "127.0.0.1:9090"
-	defaultUIAddr           = "127.0.0.1:9091"
-	defaultMixedPort        = 7890
-	defaultProxyBypassRules = "localhost;127.*;<local>"
-	defaultTunStack         = "mixed"
+	appVersion                   = "v2.4.4-win"
+	defaultControllerAddr        = "127.0.0.1:9090"
+	defaultUIAddr                = "127.0.0.1:9091"
+	defaultMixedPort             = 7890
+	defaultProxyBypassRules      = "localhost;127.*;<local>"
+	defaultTunStack              = "mixed"
+	defaultSubscriptionUserAgent = "clash-verge/v2.3.0 mihomo/1.19.34"
 )
 
 // AppSettings stores desktop application preferences persisted in settings.json.
@@ -132,6 +133,7 @@ type ProfileMeta struct {
 	Name       string                `json:"name"`
 	URL        string                `json:"url,omitempty"`
 	FetchMode  string                `json:"fetchMode,omitempty"` // auto | direct | proxy
+	UserAgent  string                `json:"userAgent,omitempty"`
 	FileName   string                `json:"fileName"`
 	UpdatedAt  string                `json:"updatedAt"`
 	SizeBytes  int64                 `json:"sizeBytes"`
@@ -348,7 +350,7 @@ func newProfileID() string {
 	return "prof_" + hex.EncodeToString(buf)
 }
 
-func (s *DataStore) SaveProfileContent(id, name, sourceURL, fetchMode, yamlText string, info *SubscriptionUserinfo) (ProfileMeta, error) {
+func (s *DataStore) SaveProfileContent(id, name, sourceURL, fetchMode, userAgent, yamlText string, info *SubscriptionUserinfo) (ProfileMeta, error) {
 	trimmed := strings.TrimSpace(yamlText)
 	if trimmed == "" {
 		return ProfileMeta{}, fmt.Errorf("配置内容不能为空")
@@ -390,6 +392,9 @@ func (s *DataStore) SaveProfileContent(id, name, sourceURL, fetchMode, yamlText 
 	} else if meta.FetchMode == "" && meta.URL != "" {
 		meta.FetchMode = "auto"
 	}
+	if ua := sanitizeUserAgentInput(userAgent); ua != "" || idx < 0 {
+		meta.UserAgent = ua
+	}
 	if info != nil {
 		meta.Userinfo = info
 	}
@@ -411,6 +416,41 @@ func (s *DataStore) SaveProfileContent(id, name, sourceURL, fetchMode, yamlText 
 		return ProfileMeta{}, err
 	}
 	return meta, nil
+}
+
+// UpdateProfileSource updates subscription metadata (name, URL, fetchMode, custom User-Agent)
+// on an existing profile without requiring YAML content re-upload.
+func (s *DataStore) UpdateProfileSource(id, name, sourceURL, fetchMode, userAgent string) (ProfileMeta, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	list := s.loadProfilesLocked()
+	for i := range list {
+		if list[i].ID != id {
+			continue
+		}
+		if strings.TrimSpace(name) != "" {
+			list[i].Name = strings.TrimSpace(name)
+		}
+		u := strings.TrimSpace(sourceURL)
+		if u != "" {
+			if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+				return ProfileMeta{}, fmt.Errorf("订阅链接必须以 http:// 或 https:// 开头")
+			}
+			list[i].URL = u
+		}
+		if fm := normalizeFetchMode(fetchMode); fm != "" {
+			list[i].FetchMode = fm
+		} else if list[i].URL != "" && list[i].FetchMode == "" {
+			list[i].FetchMode = "auto"
+		}
+		list[i].UserAgent = sanitizeUserAgentInput(userAgent)
+		if err := s.saveProfilesLocked(list); err != nil {
+			return ProfileMeta{}, err
+		}
+		return list[i], nil
+	}
+	return ProfileMeta{}, fmt.Errorf("未找到配置 %q", id)
 }
 
 func (s *DataStore) DeleteProfile(id string) error {
@@ -486,11 +526,23 @@ type SubscriptionFetchResult struct {
 	UsedMode string
 }
 
+func sanitizeUserAgentInput(raw string) string {
+	cleaned := strings.NewReplacer("\r", "", "\n", "").Replace(raw)
+	return strings.TrimSpace(cleaned)
+}
+
+func effectiveSubscriptionUserAgent(raw string) string {
+	if ua := sanitizeUserAgentInput(raw); ua != "" {
+		return ua
+	}
+	return defaultSubscriptionUserAgent
+}
+
 // FetchSubscription downloads a Clash YAML subscription using the chosen mode:
-//   - "direct": bypasses proxy (ideal for CN-friendly subscriptions like BitzNet)
+//   - "direct": bypasses proxy (ideal for CN-friendly subscriptions)
 //   - "proxy": routes through local Mihomo mixed-port (ideal for overseas subscriptions)
 //   - "auto": tries direct first, falls back to local proxy if direct fails
-func FetchSubscription(subURL, mode string, mixedPort int) (SubscriptionFetchResult, error) {
+func FetchSubscription(subURL, mode, userAgent string, mixedPort int) (SubscriptionFetchResult, error) {
 	u := strings.TrimSpace(subURL)
 	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
 		return SubscriptionFetchResult{}, fmt.Errorf("订阅链接必须以 http:// 或 https:// 开头")
@@ -499,6 +551,7 @@ func FetchSubscription(subURL, mode string, mixedPort int) (SubscriptionFetchRes
 	if m == "" {
 		m = "auto"
 	}
+	ua := effectiveSubscriptionUserAgent(userAgent)
 
 	doFetch := func(useProxy bool) (SubscriptionFetchResult, error) {
 		tr := &http.Transport{
@@ -516,7 +569,7 @@ func FetchSubscription(subURL, mode string, mixedPort int) (SubscriptionFetchRes
 		if err != nil {
 			return SubscriptionFetchResult{}, err
 		}
-		req.Header.Set("User-Agent", "clash-verge/v2.3.0 mihomo/1.19.34")
+		req.Header.Set("User-Agent", ua)
 		resp, err := client.Do(req)
 		if err != nil {
 			return SubscriptionFetchResult{}, err
@@ -529,9 +582,9 @@ func FetchSubscription(subURL, mode string, mixedPort int) (SubscriptionFetchRes
 		if err != nil {
 			return SubscriptionFetchResult{}, fmt.Errorf("读取订阅内容失败: %w", err)
 		}
-		text := strings.TrimSpace(string(body))
-		if text == "" {
-			return SubscriptionFetchResult{}, fmt.Errorf("订阅返回内容为空")
+		text, _, nErr := NormalizeFetchedSubscription(string(body))
+		if nErr != nil {
+			return SubscriptionFetchResult{}, nErr
 		}
 		used := "direct"
 		if useProxy {

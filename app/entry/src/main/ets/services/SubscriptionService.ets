@@ -6,6 +6,8 @@ import { ClashConfigParserService, ParsedProxyNode } from './ClashConfigParserSe
 import { ConvertedSubscription, GenericSubscriptionConverterService } from './GenericSubscriptionConverterService';
 import { ProfileStore } from './ProfileStore';
 
+const DEFAULT_SUBSCRIPTION_USER_AGENT: string = 'clash-verge/v2.3.0 mihomo/1.19.34';
+
 export interface SubscriptionUpdateResult {
   ok: boolean;
   message: string;
@@ -31,7 +33,7 @@ export class SubscriptionService {
       };
     }
 
-    const payload: FetchResult = await SubscriptionService.fetchText(profile.source);
+    const payload: FetchResult = await SubscriptionService.fetchText(profile.source, profile.userAgent ? profile.userAgent : '');
     if (!payload.ok) {
       return {
         ok: false,
@@ -58,6 +60,7 @@ export class SubscriptionService {
       type: profile.type,
       name: profile.name,
       source: profile.source,
+      userAgent: profile.userAgent ? profile.userAgent : '',
       filePath: filePath,
       updatedAt: Date.now(),
       nodeCount: converted.nodeCount > 0 ? converted.nodeCount : SubscriptionService.estimateNodeCount(converted.text),
@@ -81,14 +84,16 @@ export class SubscriptionService {
     return undefined;
   }
 
-  private static async fetchText(url: string): Promise<FetchResult> {
+  private static async fetchText(url: string, userAgent: string = ''): Promise<FetchResult> {
+    const cleanUa: string = userAgent.replace(/[\r\n]/g, '').trim();
+    const effectiveUa: string = cleanUa.length > 0 ? cleanUa : DEFAULT_SUBSCRIPTION_USER_AGENT;
     const request: http.HttpRequest = http.createHttp();
     try {
       const response: http.HttpResponse = await request.request(url, {
         method: http.RequestMethod.GET,
         expectDataType: http.HttpDataType.STRING,
         header: {
-          'User-Agent': 'clash-verge/v2.3.0 mihomo/1.19.34'
+          'User-Agent': effectiveUa
         },
         readTimeout: 15000,
         connectTimeout: 8000,

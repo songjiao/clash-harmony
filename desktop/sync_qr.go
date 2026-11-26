@@ -78,6 +78,7 @@ func BuildMobileSyncBundle(store *DataStore) MobileSyncBundle {
 				Name:      meta.Name,
 				URL:       meta.URL,
 				FetchMode: meta.FetchMode,
+				UserAgent: meta.UserAgent,
 				Content:   content,
 			})
 		}
@@ -92,6 +93,7 @@ func BuildMobileSyncBundle(store *DataStore) MobileSyncBundle {
 				Name:      meta.Name,
 				URL:       meta.URL,
 				FetchMode: meta.FetchMode,
+				UserAgent: meta.UserAgent,
 				Content:   content,
 			})
 			break

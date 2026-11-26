@@ -97,7 +97,20 @@ export class ProfileStore {
     let replaced: boolean = false;
     for (let index = 0; index < state.items.length; index++) {
       if (state.items[index].uid === profile.uid) {
-        items.push(profile);
+        const merged: ClashProfile = {
+          uid: profile.uid,
+          type: profile.type,
+          name: profile.name,
+          source: profile.source,
+          userAgent: profile.userAgent !== undefined
+            ? profile.userAgent
+            : (state.items[index].userAgent ? state.items[index].userAgent : ''),
+          filePath: profile.filePath,
+          updatedAt: profile.updatedAt,
+          nodeCount: profile.nodeCount,
+          traffic: profile.traffic
+        };
+        items.push(merged);
         replaced = true;
       } else {
         items.push(state.items[index]);
@@ -149,6 +162,7 @@ export class ProfileStore {
           type: item.type === 'local' ? 'local' : 'remote',
           name: item.name,
           source: item.source,
+          userAgent: typeof item.userAgent === 'string' ? item.userAgent : '',
           filePath: item.filePath ? item.filePath : '',
           updatedAt: item.updatedAt,
           nodeCount: item.nodeCount,

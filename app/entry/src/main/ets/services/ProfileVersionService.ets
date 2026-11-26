@@ -174,10 +174,13 @@ export class ProfileVersionService {
       type: profile.type,
       name: profile.name,
       source: profile.source,
+      userAgent: profile.userAgent ? profile.userAgent : '',
       filePath: versionFilePath,
       updatedAt: now,
       nodeCount: nodeCount,
-      traffic: ProfileVersionService.formatSize(yamlText.length)
+      traffic: profile.traffic && profile.traffic.length > 0 && profile.traffic !== '未知'
+        ? profile.traffic
+        : ProfileVersionService.formatSize(yamlText.length)
     };
     const nextState: ProfileState = await ProfileStore.replace(context, updatedProfile);
     return {

@@ -863,6 +863,7 @@ export class OverlayService {
       entry['name'] = p.name;
       entry['url'] = url;
       entry['fetchMode'] = 'auto';
+      entry['userAgent'] = p.userAgent ? p.userAgent : '';
       entry['active'] = p.uid === profileState.currentUid;
       entry['content'] = sanitize ? OverlayService.sanitizeYamlText(content) : content;
       exportedProfiles.push(entry);
@@ -1021,11 +1022,12 @@ export class OverlayService {
           }
           const name: string = OverlayService.readNonEmpty(item, 'name', `同步配置 ${i + 1}`);
           const url: string = OverlayService.readStr(item, 'url');
+          const userAgent: string = OverlayService.readStr(item, 'userAgent');
           const content: string = OverlayService.readStr(item, 'content');
 
           let profile: ClashProfile;
           if (url.length > 0 && url.indexOf('<REDACTED>') < 0) {
-            profile = createRemoteProfile(name, url);
+            profile = createRemoteProfile(name, url, userAgent);
           } else {
             profile = createLocalProfile(name, '', 0, `${Math.round(content.length / 1024)} KB`);
           }

@@ -1,5 +1,6 @@
 import { util } from '@kit.ArkTS';
 import { ClashConfigParserService, ParsedProxyNode } from './ClashConfigParserService';
+import { OverlayService, ParsedCustomProxies } from './OverlayService';
 
 export interface ConvertedSubscription {
   ok: boolean;
@@ -22,7 +23,17 @@ interface ShadowsocksNode {
 
 export class GenericSubscriptionConverterService {
   static normalizeToClashYaml(rawText: string): ConvertedSubscription {
-    const trimmed: string = rawText.trim();
+    const trimmed: string = rawText.replace(/^\uFEFF/, '').trim();
+    const lower: string = trimmed.toLowerCase();
+    if (lower.startsWith('<!doctype') || lower.startsWith('<html') || lower.startsWith('<head') || lower.startsWith('<body') || lower.startsWith('<script')) {
+      return {
+        ok: false,
+        message: '订阅返回的是 HTML 页面而非 Clash YAML（请检查链接、有效期或 User-Agent）',
+        text: '',
+        nodeCount: 0,
+        converted: false
+      };
+    }
     if (GenericSubscriptionConverterService.looksLikeClashYaml(trimmed)) {
       const nodes: ParsedProxyNode[] = ClashConfigParserService.parseProxyNodes(trimmed);
       return {
@@ -34,24 +45,54 @@ export class GenericSubscriptionConverterService {
       };
     }
 
-    const decoded: string = GenericSubscriptionConverterService.tryDecodeBase64(trimmed);
+    const decoded: string = GenericSubscriptionConverterService.tryDecodeBase64(trimmed).replace(/^\uFEFF/, '').trim();
+    if (decoded.length > 0 && GenericSubscriptionConverterService.looksLikeClashYaml(decoded)) {
+      const nodes: ParsedProxyNode[] = ClashConfigParserService.parseProxyNodes(decoded);
+      return {
+        ok: true,
+        message: 'Base64 Clash YAML',
+        text: decoded,
+        nodeCount: nodes.length,
+        converted: true
+      };
+    }
     const candidates: string[] = decoded.length > 0 ? [trimmed, decoded] : [trimmed];
     for (let index = 0; index < candidates.length; index++) {
-      const nodes: ShadowsocksNode[] = GenericSubscriptionConverterService.parseShadowsocksNodes(candidates[index]);
-      if (nodes.length > 0) {
+      const ssNodes: ShadowsocksNode[] = GenericSubscriptionConverterService.parseShadowsocksNodes(candidates[index]);
+      const multiParsed: ParsedCustomProxies = OverlayService.parseCustomProxiesYaml(candidates[index]);
+      if (multiParsed.names.length > ssNodes.length && multiParsed.names.length > 0) {
+        return {
+          ok: true,
+          message: `已将通用订阅转换为 Clash YAML（${multiParsed.names.length} 个节点）`,
+          text: GenericSubscriptionConverterService.buildClashYamlFromParsed(multiParsed),
+          nodeCount: multiParsed.names.length,
+          converted: true
+        };
+      }
+      if (ssNodes.length > 0) {
         return {
           ok: true,
           message: `已将通用 Shadowsocks 订阅转换为 Clash YAML`,
-          text: GenericSubscriptionConverterService.buildClashYaml(nodes),
-          nodeCount: nodes.length,
+          text: GenericSubscriptionConverterService.buildClashYaml(ssNodes),
+          nodeCount: ssNodes.length,
           converted: true
         };
       }
     }
 
+    if (trimmed.indexOf('#!MANAGED-CONFIG') >= 0 || trimmed.indexOf('[General]') >= 0 || trimmed.indexOf('[Proxy]') >= 0) {
+      return {
+        ok: false,
+        message: '订阅返回的是 Surge/Shadowrocket (.conf) 格式而非 Clash YAML，请确认订阅参数或 User-Agent',
+        text: '',
+        nodeCount: 0,
+        converted: false
+      };
+    }
+
     return {
       ok: false,
-      message: '订阅内容不是 Clash/Mihomo YAML，也未识别到可转换的 Shadowsocks 节点',
+      message: '订阅内容不是 Clash/Mihomo YAML，也未识别到可转换的 Base64 节点列表',
       text: '',
       nodeCount: 0,
       converted: false
@@ -245,7 +286,56 @@ export class GenericSubscriptionConverterService {
       lines.push(`      - ${GenericSubscriptionConverterService.yamlString(nodes[index].name)}`);
     }
     lines.push('rules:');
+    lines.push('  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve');
+    lines.push('  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve');
+    lines.push('  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve');
+    lines.push('  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve');
+    lines.push('  - GEOIP,CN,DIRECT');
     lines.push('  - MATCH,Proxy');
+    lines.push('');
+    return lines.join('\n');
+  }
+
+  private static buildClashYamlFromParsed(parsed: ParsedCustomProxies): string {
+    const lines: string[] = [
+      'mixed-port: 7890',
+      'allow-lan: false',
+      'mode: rule',
+      'log-level: info',
+      'external-controller: 127.0.0.1:9090',
+      'secret: ""',
+      'proxies:'
+    ];
+    for (let i = 0; i < parsed.blocks.length; i++) {
+      const block: string[] = parsed.blocks[i];
+      for (let j = 0; j < block.length; j++) {
+        lines.push(`  ${block[j]}`);
+      }
+    }
+    lines.push('proxy-groups:');
+    lines.push("  - name: '🚀 节点选择'");
+    lines.push('    type: select');
+    lines.push('    proxies:');
+    lines.push("      - '♻️ 自动选择'");
+    for (let i = 0; i < parsed.names.length; i++) {
+      lines.push(`      - ${GenericSubscriptionConverterService.yamlString(parsed.names[i])}`);
+    }
+    lines.push("  - name: '♻️ 自动选择'");
+    lines.push('    type: url-test');
+    lines.push("    url: 'https://www.gstatic.com/generate_204'");
+    lines.push('    interval: 300');
+    lines.push('    tolerance: 50');
+    lines.push('    proxies:');
+    for (let i = 0; i < parsed.names.length; i++) {
+      lines.push(`      - ${GenericSubscriptionConverterService.yamlString(parsed.names[i])}`);
+    }
+    lines.push('rules:');
+    lines.push('  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve');
+    lines.push('  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve');
+    lines.push('  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve');
+    lines.push('  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve');
+    lines.push('  - GEOIP,CN,DIRECT');
+    lines.push('  - MATCH,🚀 节点选择');
     lines.push('');
     return lines.join('\n');
   }

@@ -183,8 +183,8 @@ const NAV_ITEMS: NavItem[] = [
 ];
 const LOG_DOMAIN: number = 0x0001;
 const LOG_TAG: string = 'ClashHarmonyIndex';
-const APP_VERSION_NAME: string = 'v2.4.4';
-const APP_BUILD_UPDATED_AT: string = '2026-11-26 00:32';
+const APP_VERSION_NAME: string = 'v2.4.5';
+const APP_BUILD_UPDATED_AT: string = '2026-11-26 11:40';
 const DELAY_TEST_TIMEOUT_MS: number = 4500;
 const DELAY_TEST_URLS: string[] = [
   'https://cp.cloudflare.com/generate_204',
@@ -235,6 +235,11 @@ struct Index {
   @State private showImportPanel: boolean = false;
   @State private importUrl: string = '';
   @State private importName: string = '';
+  @State private importUserAgent: string = '';
+  @State private editingSubMetaUid: string = '';
+  @State private editingSubMetaName: string = '';
+  @State private editingSubMetaUrl: string = '';
+  @State private editingSubMetaUserAgent: string = '';
   @State private statusMessage: string = '请先导入或启用一个配置';
   @State private runtimeConfigPath: string = '';
   @State private runtimeConfigInfo: string = '尚未生成运行配置';
@@ -730,12 +735,14 @@ struct Index {
       return;
     }
     const name: string = this.importName.trim().length > 0 ? this.importName.trim() : this.createProfileNameFromUrl(url);
+    const userAgent: string = this.importUserAgent.replace(/[\r\n]/g, '').trim();
     const context = getContext(this) as common.Context;
     const prevCurrentUid: string = this.profileState.currentUid;
-    const newProfile: ClashProfile = createRemoteProfile(name, url);
+    const newProfile: ClashProfile = createRemoteProfile(name, url, userAgent);
     const next: ProfileState = await ProfileStore.addRemote(context, newProfile);
     this.importUrl = '';
     this.importName = '';
+    this.importUserAgent = '';
     this.showImportPanel = false;
     this.applyProfileState(next);
     if (prevCurrentUid.length > 0 && newProfile.uid !== next.currentUid) {
@@ -765,6 +772,72 @@ struct Index {
     }
     this.syncHomeRuntimeFields();
     this.recordLog('info', this.statusMessage);
+  }
+
+  private openSubMetaEditor(item: ClashProfile): void {
+    this.editingSubMetaUid = item.uid;
+    this.editingSubMetaName = item.name;
+    this.editingSubMetaUrl = item.type === 'remote' ? item.source : '';
+    this.editingSubMetaUserAgent = item.userAgent ? item.userAgent : '';
+  }
+
+  private closeSubMetaEditor(): void {
+    this.editingSubMetaUid = '';
+    this.editingSubMetaName = '';
+    this.editingSubMetaUrl = '';
+    this.editingSubMetaUserAgent = '';
+  }
+
+  private async saveSubMetaEditor(refreshNow: boolean): Promise<void> {
+    const uid: string = this.editingSubMetaUid;
+    if (uid.length === 0) {
+      return;
+    }
+    let existing: ClashProfile | undefined = undefined;
+    for (let i = 0; i < this.profileState.items.length; i++) {
+      if (this.profileState.items[i].uid === uid) {
+        existing = this.profileState.items[i];
+        break;
+      }
+    }
+    if (!existing) {
+      this.closeSubMetaEditor();
+      return;
+    }
+    const nextUrl: string = this.editingSubMetaUrl.trim();
+    if (nextUrl.length > 0 && !nextUrl.startsWith('http://') && !nextUrl.startsWith('https://')) {
+      this.statusMessage = '订阅 URL 必须以 http:// 或 https:// 开头';
+      return;
+    }
+    if (refreshNow && nextUrl.length === 0) {
+      this.statusMessage = '请先填写订阅 URL 再更新';
+      return;
+    }
+    const nextName: string = this.editingSubMetaName.trim().length > 0 ? this.editingSubMetaName.trim() : existing.name;
+    const nextUa: string = this.editingSubMetaUserAgent.replace(/[\r\n]/g, '').trim();
+    const updated: ClashProfile = {
+      uid: existing.uid,
+      type: nextUrl.length > 0 ? 'remote' : existing.type,
+      name: nextName,
+      source: nextUrl.length > 0 ? nextUrl : existing.source,
+      userAgent: nextUa,
+      filePath: existing.filePath,
+      updatedAt: existing.updatedAt,
+      nodeCount: existing.nodeCount,
+      traffic: existing.traffic
+    };
+    const context = getContext(this) as common.Context;
+    const nextState: ProfileState = await ProfileStore.replace(context, updated);
+    this.applyProfileState(nextState);
+    this.closeSubMetaEditor();
+    if (refreshNow) {
+      await this.updateProfile(updated.uid);
+    } else {
+      this.statusMessage = nextUa.length > 0
+        ? `已保存订阅设置（自定义 User-Agent: ${nextUa}）`
+        : '已保存订阅设置（恢复默认 User-Agent）';
+      this.recordLog('info', this.statusMessage);
+    }
   }
 
   private async launchActiveProfileOnHome(): Promise<void> {
@@ -3382,6 +3455,69 @@ struct Index {
     }
   }
 
+  private async scanQrToFillUrl(target: string): Promise<void> {
+    try {
+      const context = getContext(this) as common.Context;
+      const scanRes: scanBarcode.ScanResult = await scanBarcode.startScanForResult(context, {
+        scanTypes: [scanCore.ScanType.QR_CODE],
+        enableMultiMode: false,
+        enableAlbum: true
+      });
+      const rawVal: string = scanRes && scanRes.originalValue ? scanRes.originalValue.trim() : '';
+      if (rawVal.length === 0) {
+        this.statusMessage = '未识别到二维码内容';
+        return;
+      }
+
+      let extractedUrl: string = rawVal;
+      let extractedName: string = '';
+      const lower: string = rawVal.toLowerCase();
+      if (lower.startsWith('clash://') || lower.startsWith('clashmeta://') || lower.startsWith('mihomo://')) {
+        const qIdx: number = rawVal.indexOf('?');
+        if (qIdx >= 0) {
+          const pairs: string[] = rawVal.substring(qIdx + 1).split('&');
+          for (let i = 0; i < pairs.length; i++) {
+            const eq: number = pairs[i].indexOf('=');
+            if (eq <= 0) {
+              continue;
+            }
+            const key: string = pairs[i].substring(0, eq).trim().toLowerCase();
+            const rawParam: string = pairs[i].substring(eq + 1).trim();
+            let decoded: string = rawParam;
+            try {
+              decoded = decodeURIComponent(rawParam.replace(/\+/g, ' '));
+            } catch (_e) {
+              decoded = rawParam;
+            }
+            if (key === 'url' && decoded.length > 0) {
+              extractedUrl = decoded.trim();
+            } else if (key === 'name' && decoded.length > 0) {
+              extractedName = decoded.trim();
+            }
+          }
+        }
+      }
+
+      if (target === 'edit') {
+        this.editingSubMetaUrl = extractedUrl;
+        if (this.editingSubMetaName.trim().length === 0 && extractedName.length > 0) {
+          this.editingSubMetaName = extractedName;
+        }
+      } else {
+        this.importUrl = extractedUrl;
+        if (this.importName.trim().length === 0 && extractedName.length > 0) {
+          this.importName = extractedName;
+        }
+      }
+      this.statusMessage = extractedUrl.startsWith('http://') || extractedUrl.startsWith('https://')
+        ? '已扫码填入订阅 URL'
+        : '已扫码填入内容，请确认是否为有效订阅 URL';
+      this.recordLog('info', this.statusMessage);
+    } catch (_err) {
+      this.statusMessage = '已取消扫码或扫码服务不可用';
+    }
+  }
+
   private resolveFinalGroupNode(startName: string): string {
     let cur: string = startName;
     const visited: string[] = [];
@@ -5032,6 +5168,9 @@ struct Index {
         } else {
           this.CompactProfileCard(this.getCurrentActiveProfile()!, true)
         }
+        if (this.editingSubMetaUid.length > 0) {
+          this.SubMetaEditorCard()
+        }
         if (this.getPendingProfile()) {
           this.CompactProfileCard(this.getPendingProfile()!, false)
         }
@@ -5117,6 +5256,13 @@ struct Index {
               Text(item.traffic).fontSize(11).fontColor('#0F766E')
             }
           }
+          if (item.type === 'remote' && item.userAgent && item.userAgent.length > 0) {
+            Text(`UA: ${item.userAgent}`)
+              .fontSize(10).fontColor('#334155')
+              .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+              .backgroundColor('#E2E8F0').borderRadius(6)
+              .maxLines(1)
+          }
         }
         .alignItems(HorizontalAlign.Start).layoutWeight(1)
         if (isActive) {
@@ -5138,15 +5284,18 @@ struct Index {
         Row({ space: 6 }) {
           if (item.type === 'remote') {
             Button(this.updatingProfileUid === item.uid ? '更新中...' : '更新订阅')
-              .layoutWeight(1).height(32).fontSize(12).fontColor('#FFFFFF')
+              .layoutWeight(1).height(32).fontSize(11).fontColor('#FFFFFF')
               .backgroundColor(this.updatingProfileUid === item.uid ? '#64748B' : '#0F766E').borderRadius(6)
               .enabled(this.updatingProfileUid.length === 0)
               .onClick(() => { this.updateProfile(item.uid) })
           }
-          Button('编辑 YAML').layoutWeight(1).height(32).fontSize(12).fontColor('#0F766E')
+          Button('订阅设置').layoutWeight(1).height(32).fontSize(11).fontColor('#334155')
+            .backgroundColor('#F1F5F9').borderRadius(6)
+            .onClick(() => { this.openSubMetaEditor(item) })
+          Button('编辑 YAML').layoutWeight(1).height(32).fontSize(11).fontColor('#0F766E')
             .backgroundColor('#E6FFFB').borderRadius(6)
             .onClick(() => { this.openProfileWorkspace(item.uid, 'editor', false) })
-          Button('流量规则').layoutWeight(1).height(32).fontSize(12).fontColor('#2563EB')
+          Button('流量规则').layoutWeight(1).height(32).fontSize(11).fontColor('#2563EB')
             .backgroundColor('#EFF6FF').borderRadius(6)
             .onClick(() => { this.openProfileWorkspace(item.uid, 'flow', false) })
         }
@@ -6009,9 +6158,21 @@ struct Index {
       TextInput({ placeholder: '订阅名称，可留空', text: this.importName }).height(40)
         .backgroundColor('#F8FAFC').borderRadius(8)
         .onChange((value: string) => { this.importName = value })
-      TextInput({ placeholder: 'https://example.com/sub.yaml', text: this.importUrl }).height(40)
+      Row({ space: 6 }) {
+        TextInput({ placeholder: 'https://example.com/sub.yaml', text: this.importUrl })
+          .layoutWeight(1).height(40)
+          .backgroundColor('#F8FAFC').borderRadius(8)
+          .onChange((value: string) => { this.importUrl = value })
+        Button('📷 扫码')
+          .height(40).fontSize(12).fontWeight(FontWeight.Medium)
+          .fontColor('#0F766E').backgroundColor('#CCFBF1').borderRadius(8)
+          .padding({ left: 10, right: 10 })
+          .onClick(() => { this.scanQrToFillUrl('import') })
+      }
+      .width('100%')
+      TextInput({ placeholder: '自定义 User-Agent（可选，留空默认 clash-verge）', text: this.importUserAgent }).height(40)
         .backgroundColor('#F8FAFC').borderRadius(8)
-        .onChange((value: string) => { this.importUrl = value })
+        .onChange((value: string) => { this.importUserAgent = value })
       Row({ space: 8 }) {
         Button('取消').layoutWeight(1).height(36).fontColor('#0F172A')
           .backgroundColor('#EEF2F7').borderRadius(8)
@@ -6022,6 +6183,46 @@ struct Index {
       }
     }
     .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#99F6E4' })
+  }
+
+  @Builder
+  private SubMetaEditorCard() {
+    Column({ space: 10 }) {
+      Row() {
+        Text('编辑订阅设置（URL / User-Agent）').fontSize(14).fontWeight(FontWeight.Bold).fontColor('#0F172A').layoutWeight(1)
+        Button('关闭').height(26).fontSize(11).fontColor('#475569').backgroundColor('#F1F5F9').borderRadius(6)
+          .onClick(() => { this.closeSubMetaEditor() })
+      }
+      .width('100%')
+      TextInput({ placeholder: '配置名称', text: this.editingSubMetaName }).height(38)
+        .fontSize(13).backgroundColor('#F8FAFC').borderRadius(8)
+        .onChange((value: string) => { this.editingSubMetaName = value })
+      Row({ space: 6 }) {
+        TextInput({ placeholder: '订阅地址 https://...', text: this.editingSubMetaUrl })
+          .layoutWeight(1).height(38)
+          .fontSize(13).backgroundColor('#F8FAFC').borderRadius(8)
+          .onChange((value: string) => { this.editingSubMetaUrl = value })
+        Button('📷 扫码')
+          .height(38).fontSize(12).fontWeight(FontWeight.Medium)
+          .fontColor('#0F766E').backgroundColor('#CCFBF1').borderRadius(8)
+          .padding({ left: 10, right: 10 })
+          .onClick(() => { this.scanQrToFillUrl('edit') })
+      }
+      .width('100%')
+      TextInput({ placeholder: '自定义 User-Agent（留空恢复默认 clash-verge）', text: this.editingSubMetaUserAgent }).height(38)
+        .fontSize(13).backgroundColor('#F8FAFC').borderRadius(8)
+        .onChange((value: string) => { this.editingSubMetaUserAgent = value })
+      Row({ space: 8 }) {
+        Button('仅保存').layoutWeight(1).height(36).fontSize(12).fontColor('#0F172A')
+          .backgroundColor('#EEF2F7').borderRadius(8)
+          .onClick(() => { this.saveSubMetaEditor(false) })
+        Button('保存并更新订阅').layoutWeight(1).height(36).fontSize(12).fontWeight(FontWeight.Bold)
+          .fontColor('#FFFFFF').backgroundColor('#0F766E').borderRadius(8)
+          .onClick(() => { this.saveSubMetaEditor(true) })
+      }
+      .width('100%')
+    }
+    .padding(12).backgroundColor('#FFFFFF').borderRadius(10).border({ width: 1.5, color: '#38BDF8' })
   }
 
   // ============== DiagnosticsScreen ==============

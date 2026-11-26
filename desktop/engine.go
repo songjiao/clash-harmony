@@ -71,6 +71,7 @@ type DesktopEngine struct {
 	proxy *SystemProxyManager
 
 	mu                sync.Mutex
+	serviceMode       bool
 	running           bool
 	tunActive         bool
 	activeCtlAddr     string
@@ -101,6 +102,14 @@ func NewDesktopEngine(store *DataStore) *DesktopEngine {
 func (e *DesktopEngine) SetOnChange(fn func()) {
 	e.mu.Lock()
 	e.onChange = fn
+	e.mu.Unlock()
+}
+
+// SetServiceMode marks the engine as running inside a Windows Session 0 service,
+// where HKCU per-user system proxy writes are skipped in favor of system-wide Wintun TUN.
+func (e *DesktopEngine) SetServiceMode(enabled bool) {
+	e.mu.Lock()
+	e.serviceMode = enabled
 	e.mu.Unlock()
 }
 
@@ -458,11 +467,11 @@ func (e *DesktopEngine) startLocked() error {
 		return err
 	}
 
-	if settings.SystemProxy {
+	if !e.serviceMode && settings.SystemProxy {
 		if pErr := e.proxy.Enable(fmt.Sprintf("127.0.0.1:%d", settings.MixedPort), settings.ProxyBypass); pErr != nil {
 			log.Warnln("[Desktop] Enable system proxy failed: %v", pErr)
 		}
-	} else {
+	} else if !e.serviceMode {
 		_ = e.proxy.Restore()
 	}
 
@@ -501,7 +510,7 @@ func (e *DesktopEngine) autoUpdateSubLoop(ctx context.Context) {
 				continue
 			}
 			log.Infoln("[Desktop] Auto-updating subscription %s (interval=%dh)...", meta.Name, settings.AutoUpdateHours)
-			res, err := FetchSubscription(meta.URL, meta.FetchMode, settings.MixedPort)
+			res, err := FetchSubscription(meta.URL, meta.FetchMode, meta.UserAgent, settings.MixedPort)
 			if err != nil {
 				log.Warnln("[Desktop] Auto-update subscription %s failed: %v", meta.Name, err)
 				continue
@@ -511,7 +520,7 @@ func (e *DesktopEngine) autoUpdateSubLoop(ctx context.Context) {
 				log.Warnln("[Desktop] Auto-update subscription %s rejected by pre-validation", meta.Name)
 				continue
 			}
-			if _, err := e.store.SaveProfileContent(meta.ID, meta.Name, meta.URL, meta.FetchMode, res.Body, res.Userinfo); err == nil {
+			if _, err := e.store.SaveProfileContent(meta.ID, meta.Name, meta.URL, meta.FetchMode, meta.UserAgent, res.Body, res.Userinfo); err == nil {
 				log.Infoln("[Desktop] Auto-update subscription %s succeeded; reloading core", meta.Name)
 				go func() { _ = e.Restart() }()
 				return

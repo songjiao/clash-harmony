@@ -421,12 +421,12 @@ func (s *DesktopServer) buildMux() http.Handler {
 		settings := s.store.LoadSettings()
 		for _, p := range bundle.Profiles {
 			if strings.TrimSpace(p.Content) != "" {
-				if _, err := s.store.SaveProfileContent("", p.Name, p.URL, p.FetchMode, p.Content, nil); err == nil {
+				if _, err := s.store.SaveProfileContent("", p.Name, p.URL, p.FetchMode, p.UserAgent, p.Content, nil); err == nil {
 					importedProfiles++
 				}
 			} else if strings.TrimSpace(p.URL) != "" && !strings.Contains(p.URL, "<REDACTED>") {
-				if res, err := FetchSubscription(p.URL, p.FetchMode, settings.MixedPort); err == nil {
-					if _, sErr := s.store.SaveProfileContent("", p.Name, p.URL, p.FetchMode, res.Body, res.Userinfo); sErr == nil {
+				if res, err := FetchSubscription(p.URL, p.FetchMode, p.UserAgent, settings.MixedPort); err == nil {
+					if _, sErr := s.store.SaveProfileContent("", p.Name, p.URL, p.FetchMode, p.UserAgent, res.Body, res.Userinfo); sErr == nil {
 						importedProfiles++
 					}
 				}
@@ -527,6 +527,7 @@ func (s *DesktopServer) buildMux() http.Handler {
 			Name      string `json:"name"`
 			URL       string `json:"url"`
 			FetchMode string `json:"fetchMode"`
+			UserAgent string `json:"userAgent"`
 			Content   string `json:"content"`
 			Activate  bool   `json:"activate"`
 		}
@@ -539,7 +540,7 @@ func (s *DesktopServer) buildMux() http.Handler {
 		var userinfo *SubscriptionUserinfo
 		usedMode := ""
 		if strings.TrimSpace(yamlText) == "" && strings.TrimSpace(req.URL) != "" {
-			res, err := FetchSubscription(req.URL, req.FetchMode, settings.MixedPort)
+			res, err := FetchSubscription(req.URL, req.FetchMode, req.UserAgent, settings.MixedPort)
 			if err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 				return
@@ -569,12 +570,12 @@ func (s *DesktopServer) buildMux() http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]any{
 				"ok":    false,
 				"line":  mergedVal.Line,
-				"error": fmt.Sprintf("融合运行态预校验失败 (第 %d 行): %s", mergedVal.Line, mergedVal.Error),
+				"error": fmt.Sprintf("融合运行态预校验失败 (第 %d 行): %s%s", mergedVal.Line, mergedVal.Error, formatLineSnippetSuffix(mergedPreview, mergedVal.Line)),
 			})
 			return
 		}
 
-		meta, err := s.store.SaveProfileContent(req.ID, req.Name, req.URL, req.FetchMode, yamlText, userinfo)
+		meta, err := s.store.SaveProfileContent(req.ID, req.Name, req.URL, req.FetchMode, req.UserAgent, yamlText, userinfo)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
@@ -628,6 +629,7 @@ func (s *DesktopServer) buildMux() http.Handler {
 		var req struct {
 			ID        string `json:"id"`
 			FetchMode string `json:"fetchMode"`
+			UserAgent string `json:"userAgent"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
@@ -647,7 +649,11 @@ func (s *DesktopServer) buildMux() http.Handler {
 		if strings.TrimSpace(mode) == "" {
 			mode = meta.FetchMode
 		}
-		res, err := FetchSubscription(meta.URL, mode, settings.MixedPort)
+		ua := sanitizeUserAgentInput(req.UserAgent)
+		if ua == "" {
+			ua = meta.UserAgent
+		}
+		res, err := FetchSubscription(meta.URL, mode, ua, settings.MixedPort)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
@@ -661,11 +667,11 @@ func (s *DesktopServer) buildMux() http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]any{
 				"ok":    false,
 				"line":  mergedVal.Line,
-				"error": fmt.Sprintf("订阅更新融合后预校验失败 (第 %d 行): %s", mergedVal.Line, mergedVal.Error),
+				"error": fmt.Sprintf("订阅更新融合后预校验失败 (第 %d 行): %s%s", mergedVal.Line, mergedVal.Error, formatLineSnippetSuffix(mergedPreview, mergedVal.Line)),
 			})
 			return
 		}
-		updated, err := s.store.SaveProfileContent(meta.ID, meta.Name, meta.URL, mode, res.Body, res.Userinfo)
+		updated, err := s.store.SaveProfileContent(meta.ID, meta.Name, meta.URL, mode, ua, res.Body, res.Userinfo)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
@@ -674,6 +680,63 @@ func (s *DesktopServer) buildMux() http.Handler {
 			_ = s.engine.Restart()
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "profile": updated, "usedMode": res.UsedMode})
+	})
+
+	mux.HandleFunc("/api/profiles/meta", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		var req struct {
+			ID        string `json:"id"`
+			Name      string `json:"name"`
+			URL       string `json:"url"`
+			FetchMode string `json:"fetchMode"`
+			UserAgent string `json:"userAgent"`
+			Refresh   bool   `json:"refresh"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		updated, err := s.store.UpdateProfileSource(req.ID, req.Name, req.URL, req.FetchMode, req.UserAgent)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if !req.Refresh || strings.TrimSpace(updated.URL) == "" {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "profile": updated, "refreshed": false})
+			return
+		}
+		settings := s.store.LoadSettings()
+		res, err := FetchSubscription(updated.URL, updated.FetchMode, updated.UserAgent, settings.MixedPort)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "profile": updated, "error": "设置已保存，但拉取订阅失败: " + err.Error()})
+			return
+		}
+		mergedPreview, mErr := BuildRuntimeYAMLWithOverlay(res.Body, s.store.LoadOverlay(), s.store.LoadTailscalePrefs(), settings)
+		if mErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "profile": updated, "error": "设置已保存，但融合运行配置失败: " + mErr.Error()})
+			return
+		}
+		if mergedVal := validateConfigYAML(mergedPreview); !mergedVal.OK {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"ok":      false,
+				"profile": updated,
+				"line":    mergedVal.Line,
+				"error":   fmt.Sprintf("设置已保存，但订阅融合预校验失败 (第 %d 行): %s%s", mergedVal.Line, mergedVal.Error, formatLineSnippetSuffix(mergedPreview, mergedVal.Line)),
+			})
+			return
+		}
+		saved, err := s.store.SaveProfileContent(updated.ID, updated.Name, updated.URL, updated.FetchMode, updated.UserAgent, res.Body, res.Userinfo)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "profile": updated, "error": err.Error()})
+			return
+		}
+		if settings.ActiveProfileID == saved.ID && s.engine.State().Running {
+			_ = s.engine.Restart()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "profile": saved, "refreshed": true, "usedMode": res.UsedMode})
 	})
 
 	// Logs & active runtime YAML inspection
