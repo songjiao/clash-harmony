@@ -1,4 +1,4 @@
-//go:build openharmony && with_gvisor
+//go:build (openharmony || android) && with_gvisor
 
 package sing_tun
 

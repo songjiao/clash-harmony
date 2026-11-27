@@ -442,6 +442,157 @@ func (s *DesktopServer) buildMux() http.Handler {
 		})
 	})
 
+	// Receive PC -> Phone LAN QR sync URL (clashharmony://sync?url=...) or raw JSON bundle
+	mux.HandleFunc("/api/sync/import-url", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		var req struct {
+			QRText string `json:"qrText"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4*1024*1024)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		rawVal := strings.TrimSpace(req.QRText)
+		if rawVal == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "未提供同步二维码或链接"})
+			return
+		}
+		var rawJSON []byte
+		if strings.HasPrefix(rawVal, "{") {
+			rawJSON = []byte(rawVal)
+		} else {
+			syncURL := rawVal
+			if strings.HasPrefix(strings.ToLower(rawVal), "clashharmony://sync") {
+				if parsed, pErr := url.Parse(rawVal); pErr == nil {
+					if uParam := strings.TrimSpace(parsed.Query().Get("url")); uParam != "" {
+						syncURL = uParam
+					}
+				}
+			}
+			if !strings.HasPrefix(strings.ToLower(syncURL), "http://") && !strings.HasPrefix(strings.ToLower(syncURL), "https://") {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "不是有效的 Clash Harmony 同步二维码（请在电脑端点击「扫码同步到手机」生成）"})
+				return
+			}
+			client := &http.Client{
+				Timeout:   12 * time.Second,
+				Transport: &http.Transport{Proxy: nil},
+			}
+			resp, err := client.Get(syncURL)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "连接电脑同步地址失败（请确认手机和电脑在同一 Wi-Fi）: " + err.Error()})
+				return
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "读取同步内容失败: " + err.Error()})
+				return
+			}
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": fmt.Sprintf("电脑同步服务返回 HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))})
+				return
+			}
+			rawJSON = body
+		}
+
+		var payload struct {
+			FormatVersion    int                   `json:"formatVersion"`
+			Overlay          CustomOverlay         `json:"overlay"`
+			TailscaleRouting *TailscaleRoutingSync `json:"tailscaleRouting"`
+			TailscalePrefs   *TailscaleNativePrefs `json:"tailscalePrefs"`
+			Profiles         []BackupProfileRecord `json:"profiles"`
+		}
+		if err := json.Unmarshal(rawJSON, &payload); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "解析同步包 JSON 失败: " + err.Error()})
+			return
+		}
+		if _, err := ParseCustomProxiesYAML(payload.Overlay.CustomProxiesYAML); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if err := s.store.SaveOverlay(payload.Overlay); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+
+		// Sync Tailscale routing policy ONLY — strictly preserve this device's own hostname/authKey/exitNode!
+		curTS := s.store.LoadTailscalePrefs()
+		if payload.TailscaleRouting != nil {
+			rt := payload.TailscaleRouting
+			curTS.ManagedByApp = rt.ManagedByApp
+			curTS.Enabled = rt.Enabled
+			if strings.TrimSpace(rt.ProxyName) != "" {
+				curTS.ProxyName = rt.ProxyName
+			}
+			curTS.ControlURL = rt.ControlURL
+			curTS.AcceptRoutes = rt.AcceptRoutes
+			curTS.AutoInjectMagicDNS = rt.AutoInjectMagicDNS
+			if strings.TrimSpace(rt.TailnetSuffix) != "" {
+				curTS.TailnetSuffix = rt.TailnetSuffix
+			}
+			curTS.AutoSyncSplitDNS = rt.AutoSyncSplitDNS
+			if len(rt.SplitDNSDomains) > 0 {
+				curTS.SplitDNSDomains = append([]string(nil), rt.SplitDNSDomains...)
+			}
+			if len(rt.SubnetRoutes) > 0 {
+				curTS.SubnetRoutes = append([]string(nil), rt.SubnetRoutes...)
+			}
+			_ = s.store.SaveTailscalePrefs(curTS)
+		} else if payload.TailscalePrefs != nil {
+			tp := payload.TailscalePrefs
+			curTS.ManagedByApp = tp.ManagedByApp
+			curTS.Enabled = tp.Enabled
+			if strings.TrimSpace(tp.ProxyName) != "" {
+				curTS.ProxyName = tp.ProxyName
+			}
+			curTS.ControlURL = tp.ControlURL
+			curTS.AcceptRoutes = tp.AcceptRoutes
+			curTS.AutoInjectMagicDNS = tp.AutoInjectMagicDNS
+			if strings.TrimSpace(tp.TailnetSuffix) != "" {
+				curTS.TailnetSuffix = tp.TailnetSuffix
+			}
+			curTS.AutoSyncSplitDNS = tp.AutoSyncSplitDNS
+			if len(tp.SplitDNSDomains) > 0 {
+				curTS.SplitDNSDomains = append([]string(nil), tp.SplitDNSDomains...)
+			}
+			_ = s.store.SaveTailscalePrefs(curTS)
+		}
+
+		importedProfiles := 0
+		lastID := ""
+		settings := s.store.LoadSettings()
+		for _, p := range payload.Profiles {
+			if strings.TrimSpace(p.Content) != "" {
+				if meta, err := s.store.SaveProfileContent("", p.Name, p.URL, p.FetchMode, p.UserAgent, p.Content, nil); err == nil {
+					importedProfiles++
+					lastID = meta.ID
+				}
+			} else if strings.TrimSpace(p.URL) != "" && !strings.Contains(p.URL, "<REDACTED>") {
+				if res, err := FetchSubscription(p.URL, p.FetchMode, p.UserAgent, settings.MixedPort); err == nil {
+					if meta, sErr := s.store.SaveProfileContent("", p.Name, p.URL, p.FetchMode, p.UserAgent, res.Body, res.Userinfo); sErr == nil {
+						importedProfiles++
+						lastID = meta.ID
+					}
+				}
+			}
+		}
+		if lastID != "" {
+			settings.ActiveProfileID = lastID
+			_ = s.store.SaveSettings(settings)
+		}
+		if s.engine.State().Running {
+			_ = s.engine.Restart()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":               true,
+			"importedProfiles": importedProfiles,
+			"message":          fmt.Sprintf("已同步电脑配置（订阅 %d 份 + 自建节点与 AI 规则 + Tailscale 分流策略），点击顶部「开启 VPN」后登录 Tailscale 即可使用！", importedProfiles),
+		})
+	})
+
 	// Tailscale native prefs (persisted in tailscale-prefs.json)
 	mux.HandleFunc("/api/tailscale/prefs", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {

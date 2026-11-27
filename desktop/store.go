@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	appVersion                   = "v2.4.4-win"
+	appVersion                   = "v2.4.5-win"
 	defaultControllerAddr        = "127.0.0.1:9090"
 	defaultUIAddr                = "127.0.0.1:9091"
 	defaultMixedPort             = 7890
@@ -77,9 +77,13 @@ type TailscaleNativePrefs struct {
 	AutoSyncSplitDNS   bool     `json:"autoSyncSplitDns"`
 	SplitDNSDomains    []string `json:"splitDnsDomains"`
 	SubnetRoutes       []string `json:"subnetRoutes"`
+	AdvertiseRoutes    []string `json:"advertiseRoutes,omitempty"`
 }
 
 func defaultTailscaleHostname() string {
+	if custom := defaultPlatformHostname(); custom != "" {
+		return custom
+	}
 	h, err := os.Hostname()
 	if err != nil {
 		return "clash-harmony-win"
@@ -116,6 +120,7 @@ func defaultTailscalePrefs() TailscaleNativePrefs {
 		AutoSyncSplitDNS:   true,
 		SplitDNSDomains:    []string{},
 		SubnetRoutes:       []string{},
+		AdvertiseRoutes:    []string{},
 	}
 }
 
@@ -283,6 +288,7 @@ func (s *DataStore) LoadTailscalePrefs() TailscaleNativePrefs {
 	}
 	prefs.SplitDNSDomains = normalizeDomainList(prefs.SplitDNSDomains)
 	prefs.SubnetRoutes = normalizeCIDRList(prefs.SubnetRoutes)
+	prefs.AdvertiseRoutes = normalizeCIDRList(prefs.AdvertiseRoutes)
 	return prefs
 }
 
@@ -297,6 +303,7 @@ func (s *DataStore) SaveTailscalePrefs(prefs TailscaleNativePrefs) error {
 	}
 	prefs.SplitDNSDomains = normalizeDomainList(prefs.SplitDNSDomains)
 	prefs.SubnetRoutes = normalizeCIDRList(prefs.SubnetRoutes)
+	prefs.AdvertiseRoutes = normalizeCIDRList(prefs.AdvertiseRoutes)
 	return writeAtomicJSON(s.tsPrefsPath(), prefs)
 }
 

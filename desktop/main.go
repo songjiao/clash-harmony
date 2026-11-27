@@ -17,6 +17,7 @@ func main() {
 	noBrowserFlag := flag.Bool("no-browser", false, "启动后不自动打开浏览器控制台")
 	enableTunFlag := flag.Bool("enable-tun", false, "启动时开启 TUN 全局接管（配合管理员提权使用）")
 	trayOnlyFlag := flag.Bool("tray-only", false, "仅启动系统托盘伴侣图标并连接后台系统服务")
+	tunSocketFlag := flag.String("tun-socket", "", "Android VpnService TUN FD 抽象 Unix 套接字名称")
 	flag.Parse()
 
 	if *trayOnlyFlag {
@@ -78,8 +79,13 @@ func main() {
 	}
 
 	engine := NewDesktopEngine(store)
-	if inService {
+	if inService || isAndroidPlatform() {
 		engine.SetServiceMode(true)
+	}
+	if isAndroidPlatform() && strings.TrimSpace(*tunSocketFlag) != "" {
+		if err := startAndroidTunReceiver(*tunSocketFlag, engine); err != nil {
+			fmt.Fprintf(os.Stderr, "start android tun receiver failed: %v\n", err)
+		}
 	}
 	var tray *TrayApp
 	var server *DesktopServer
@@ -125,8 +131,8 @@ func main() {
 		}
 		uiURL = "http://" + boundAddr
 
-		// Auto-start core if enabled and a profile already exists.
-		if settings.AutoStartCore && (settings.ActiveProfileID != "" || len(store.ListProfiles()) > 0) {
+		// Auto-start core if enabled and a profile already exists (on Android, wait for VpnService TUN FD).
+		if !isAndroidPlatform() && settings.AutoStartCore && (settings.ActiveProfileID != "" || len(store.ListProfiles()) > 0) {
 			if err := engine.Start(); err != nil {
 				fmt.Fprintf(os.Stderr, "auto-start core warning: %v\n", err)
 			}

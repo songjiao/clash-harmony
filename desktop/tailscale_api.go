@@ -73,8 +73,10 @@ type tailscaleControlStatusDTO struct {
 	ControlURL       string                        `json:"controlUrl"`
 	Hostname         string                        `json:"hostname"`
 	LoginName        string                        `json:"loginName"`
-	TailscaleIPs     []string                      `json:"tailscaleIPs"`
-	AcceptRoutes     bool                          `json:"acceptRoutes"`
+	TailscaleIPs        []string                      `json:"tailscaleIPs"`
+	SelfAdvertiseRoutes []string                      `json:"selfAdvertiseRoutes"`
+	SelfPrimaryRoutes   []string                      `json:"selfPrimaryRoutes"`
+	AcceptRoutes        bool                          `json:"acceptRoutes"`
 	ExitNodeID       string                        `json:"exitNodeId"`
 	ExitNodeIP       string                        `json:"exitNodeIp"`
 	ExitNodeAllowLAN bool                          `json:"exitNodeAllowLan"`
@@ -138,8 +140,10 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 
 func buildTailscaleControlStatus(ctx context.Context) tailscaleControlStatusDTO {
 	dto := tailscaleControlStatusDTO{
-		TailscaleIPs:     []string{},
-		Health:           []string{},
+		TailscaleIPs:        []string{},
+		SelfAdvertiseRoutes: []string{},
+		SelfPrimaryRoutes:   []string{},
+		Health:              []string{},
 		RecentLogs:       []string{},
 		Peers:            []tailscalePeerDTO{},
 		AdvertisedRoutes: []tailscaleAdvertisedRouteDTO{},
@@ -200,6 +204,9 @@ func buildTailscaleControlStatus(ctx context.Context) tailscaleControlStatusDTO 
 		if prefs.ExitNodeIP.IsValid() {
 			dto.ExitNodeIP = prefs.ExitNodeIP.String()
 		}
+		for _, p := range prefs.AdvertiseRoutes {
+			dto.SelfAdvertiseRoutes = append(dto.SelfAdvertiseRoutes, p.String())
+		}
 	}
 
 	st, sErr := lc.Status(stCtx)
@@ -235,6 +242,11 @@ func buildTailscaleControlStatus(ctx context.Context) tailscaleControlStatusDTO 
 	if st.Self != nil {
 		if st.Self.HostName != "" {
 			dto.Hostname = st.Self.HostName
+		}
+		if st.Self.PrimaryRoutes != nil {
+			for i := 0; i < st.Self.PrimaryRoutes.Len(); i++ {
+				dto.SelfPrimaryRoutes = append(dto.SelfPrimaryRoutes, st.Self.PrimaryRoutes.At(i).String())
+			}
 		}
 		if u, ok := st.User[st.Self.UserID]; ok {
 			if u.LoginName != "" {

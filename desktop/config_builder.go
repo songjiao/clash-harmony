@@ -608,6 +608,15 @@ func buildTailscaleProxyBlockLines(prefs TailscaleNativePrefs, indent string) []
 			fmt.Sprintf("%sexit-node-allow-lan-access: %s", fieldIndent, allowLAN),
 		)
 	}
+	advRoutes := normalizeCIDRList(prefs.AdvertiseRoutes)
+	if len(advRoutes) > 0 {
+		block = append(block, fmt.Sprintf("%sadvertise-routes:", fieldIndent))
+		for _, cidr := range advRoutes {
+			block = append(block, fmt.Sprintf("%s  - %s", fieldIndent, quoteIfNeeded(cidr)))
+		}
+	} else {
+		block = append(block, fmt.Sprintf("%sadvertise-routes: []", fieldIndent))
+	}
 	return block
 }
 

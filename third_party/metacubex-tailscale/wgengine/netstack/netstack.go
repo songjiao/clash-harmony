@@ -2428,11 +2428,10 @@ func (ns *Impl) ExpVar() expvar.Var {
 //
 // TODO(bradfitz,nickkhyl): delete this and use the proper Windows APIs.
 func windowsPingOutputIsSuccess(ip netip.Addr, b []byte) bool {
-	// Look for a line that contains " <ip>: " and then three equal signs.
-	// As a special case, the 2nd equal sign may be a '<' character
-	// for sub-millisecond pings.
-	// This heuristic seems to match the ping.exe output in any language.
-	sub := fmt.Appendf(nil, " %s: ", ip)
+	// Look for a line that contains " <ip>" followed by ": " (matching both
+	// English "Reply from 10.10.1.10: ..." and Chinese "来自 10.10.1.10 的回复: ...")
+	// and then three equal signs (the 2nd may be '<' for sub-millisecond pings).
+	sub := fmt.Appendf(nil, " %s", ip)
 
 	eqSigns := func(bb []byte) (n int) {
 		for _, b := range bb {
@@ -2446,8 +2445,10 @@ func windowsPingOutputIsSuccess(ip netip.Addr, b []byte) bool {
 	for len(b) > 0 {
 		var line []byte
 		line, b, _ = bytes.Cut(b, []byte("\n"))
-		if _, rest, ok := bytes.Cut(line, sub); ok && eqSigns(rest) == 3 {
-			return true
+		if _, afterIP, ok := bytes.Cut(line, sub); ok {
+			if _, rest, ok2 := bytes.Cut(afterIP, []byte(": ")); ok2 && eqSigns(rest) == 3 {
+				return true
+			}
 		}
 	}
 	return false

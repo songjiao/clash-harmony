@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -41,6 +42,7 @@ type adapterUnwrapper interface {
 
 type DesktopEngineState struct {
 	Version           string `json:"version"`
+	Platform          string `json:"platform"`
 	CoreVersion       string `json:"coreVersion"`
 	Running           bool   `json:"running"`
 	Elevated          bool   `json:"elevated"`
@@ -72,6 +74,7 @@ type DesktopEngine struct {
 
 	mu                sync.Mutex
 	serviceMode       bool
+	androidTunFD      int
 	running           bool
 	tunActive         bool
 	activeCtlAddr     string
@@ -93,10 +96,37 @@ type DesktopEngine struct {
 
 func NewDesktopEngine(store *DataStore) *DesktopEngine {
 	return &DesktopEngine{
-		store:   store,
-		proxy:   NewSystemProxyManager(),
-		logRing: make([]string, 0, maxLogRingLines),
+		store:        store,
+		proxy:        NewSystemProxyManager(),
+		androidTunFD: -1,
+		logRing:      make([]string, 0, maxLogRingLines),
 	}
+}
+
+// SetAndroidTunFD updates the active Android VpnService TUN file descriptor.
+// Passing fd >= 0 starts or restarts the core attached to that TUN FD; passing fd < 0 stops the core.
+func (e *DesktopEngine) SetAndroidTunFD(fd int) error {
+	e.mu.Lock()
+	oldFD := e.androidTunFD
+	e.androidTunFD = fd
+	if oldFD >= 0 && oldFD != fd {
+		closeFD(oldFD)
+	}
+	var err error
+	if fd < 0 {
+		if e.running {
+			e.stopLocked()
+		}
+		e.lastErr = ""
+	} else {
+		if e.running {
+			e.stopLocked()
+		}
+		err = e.startLocked()
+	}
+	e.mu.Unlock()
+	e.notifyChange()
+	return err
 }
 
 func (e *DesktopEngine) SetOnChange(fn func()) {
@@ -151,6 +181,7 @@ func (e *DesktopEngine) State() DesktopEngineState {
 
 	return DesktopEngineState{
 		Version:           appVersion,
+		Platform:          runtime.GOOS,
 		CoreVersion:       e.CoreVersion(),
 		Running:           running,
 		Elevated:          IsElevated(),
@@ -339,6 +370,11 @@ func (e *DesktopEngine) HotReloadRules() error {
 		cfg.Controller = &config.Controller{}
 	}
 	cfg.Controller.ExternalController = settings.ControllerAddr
+	if isAndroidPlatform() {
+		// Preserve the already-attached Android VpnService TUN configuration during hot-reload
+		// so ReCreateTun calls OnReload() in-place without closing or reopening the FD.
+		cfg.General.Tun = listener.GetTunConf()
+	}
 	hub.ApplyConfig(cfg)
 	eagerStartTailscaleProxies()
 	log.Infoln("[Desktop] Hot-reloaded runtime config in-place (TUN preserved)")
@@ -367,7 +403,7 @@ func (e *DesktopEngine) startLocked() error {
 	}
 
 	settings := e.store.LoadSettings()
-	if settings.TunMode && !IsElevated() {
+	if !isAndroidPlatform() && settings.TunMode && !IsElevated() {
 		err := fmt.Errorf("开启 TUN 全局接管需要管理员权限，请先点击「以管理员重启」或关闭 TUN 模式")
 		e.lastErr = err.Error()
 		return err
@@ -443,6 +479,13 @@ func (e *DesktopEngine) startLocked() error {
 		cfg.Controller = &config.Controller{}
 	}
 	cfg.Controller.ExternalController = settings.ControllerAddr
+	if isAndroidPlatform() {
+		if err := applyAndroidTunConfig(cfg, e.androidTunFD); err != nil {
+			e.stopLogSinkLocked()
+			e.lastErr = err.Error()
+			return err
+		}
+	}
 
 	hub.ApplyConfig(cfg)
 	e.activeCtlAddr = cfg.Controller.ExternalController
@@ -453,15 +496,19 @@ func (e *DesktopEngine) startLocked() error {
 
 	actualTun := listener.GetTunConf()
 	e.tunActive = actualTun.Enable
-	if settings.TunMode && !actualTun.Enable {
+	wantTun := settings.TunMode
+	if isAndroidPlatform() {
+		wantTun = e.androidTunFD >= 0
+	}
+	if wantTun && !actualTun.Enable {
 		e.ringMu.RLock()
 		detail := strings.TrimSpace(e.lastErrL)
 		e.ringMu.RUnlock()
 		e.stopLocked()
 		if detail != "" {
-			err = fmt.Errorf("Wintun TUN 启动失败: %s", detail)
+			err = fmt.Errorf("TUN 启动失败: %s", detail)
 		} else {
-			err = fmt.Errorf("Wintun TUN 启动失败 (enable=false)，请确认以管理员身份运行且无冲突虚拟网卡")
+			err = fmt.Errorf("TUN 启动失败 (enable=false)，请检查权限或冲突虚拟网卡")
 		}
 		e.lastErr = err.Error()
 		return err

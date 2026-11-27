@@ -478,10 +478,12 @@ func New(options LC.Tun, tunnel C.Tunnel, additions ...inbound.Addition) (l *Lis
 
 	}
 
-	err = l.buildAndroidRules(&tunOptions)
-	if err != nil {
-		err = E.Cause(err, "build android rules")
-		return
+	if tunOptions.FileDescriptor <= 0 && (tunOptions.AutoRoute || len(tunOptions.IncludePackage) > 0 || len(tunOptions.ExcludePackage) > 0) {
+		err = l.buildAndroidRules(&tunOptions)
+		if err != nil {
+			err = E.Cause(err, "build android rules")
+			return
+		}
 	}
 	tunIf, err := tunNew(tunOptions)
 	if err != nil {

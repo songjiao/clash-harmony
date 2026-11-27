@@ -33,8 +33,10 @@ import (
 	"github.com/metacubex/tailscale/hostinfo"
 	"github.com/metacubex/tailscale/ipn"
 	"github.com/metacubex/tailscale/net/netmon"
+	"github.com/metacubex/tailscale/net/tsaddr"
 	"github.com/metacubex/tailscale/tailcfg"
 	"github.com/metacubex/tailscale/tsnet"
+	"github.com/metacubex/tailscale/types/nettype"
 	D "github.com/miekg/dns"
 	"github.com/samber/lo"
 )
@@ -85,6 +87,8 @@ func isDiagnosticTailscaleLog(msg string) bool {
 		"switching",
 		"to start this tsnet server",
 		"logged in",
+		"netstack:",
+		"exec ping",
 	} {
 		if strings.Contains(lower, token) {
 			return true
@@ -107,7 +111,8 @@ type Tailscale struct {
 	backendInitCh   chan struct{}
 	backendInitErr  error
 
-	serverStarted bool
+	serverStarted     bool
+	advertisePrefixes []netip.Prefix
 
 	statusMu       sync.Mutex
 	writeMu        sync.Mutex
@@ -128,9 +133,10 @@ type TailscaleOption struct {
 	Ephemeral  bool   `proxy:"ephemeral,omitempty"`
 	UDP        bool   `proxy:"udp,omitempty"`
 
-	AcceptRoutes           *bool  `proxy:"accept-routes,omitempty"`
-	ExitNode               string `proxy:"exit-node,omitempty"`
-	ExitNodeAllowLANAccess *bool  `proxy:"exit-node-allow-lan-access,omitempty"`
+	AcceptRoutes           *bool    `proxy:"accept-routes,omitempty"`
+	AdvertiseRoutes        []string `proxy:"advertise-routes,omitempty"`
+	ExitNode               string   `proxy:"exit-node,omitempty"`
+	ExitNodeAllowLANAccess *bool    `proxy:"exit-node-allow-lan-access,omitempty"`
 }
 
 func init() {
@@ -194,6 +200,10 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 	if addr == "" {
 		addr = "tailscale"
 	}
+	advertisePrefixes, err := parseTailscaleAdvertiseRoutes(option.AdvertiseRoutes)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	outbound := &Tailscale{
 		Base: NewBase(BaseOption{
@@ -206,10 +216,11 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 			RoutingMark:  option.RoutingMark,
 			Prefer:       option.IPVersion,
 		}),
-		option:        option,
-		ctx:           ctx,
-		cancel:        cancel,
-		backendInitCh: make(chan struct{}),
+		option:            option,
+		ctx:               ctx,
+		cancel:            cancel,
+		backendInitCh:     make(chan struct{}),
+		advertisePrefixes: advertisePrefixes,
 		status: TailscaleStatus{
 			Name:         option.Name,
 			Hostname:     option.Hostname,
@@ -526,7 +537,19 @@ func (t *Tailscale) watchBackendState() {
 	backendInitialized := false
 	exitNodeNeedsStatus := tailscaleExitNodeNeedsStatus(t.option)
 	exitNodeApplied := false
+	subnetForwarderInstalled := false
 	var lastAuthRequest time.Time
+
+	ensureRunningFeatures := func() {
+		if len(t.advertisePrefixes) > 0 && !subnetForwarderInstalled {
+			if err := t.applyPrefs(t.ctx); err != nil {
+				log.Warnln("[Tailscale](%s) re-apply advertise-routes prefs failed: %v", t.Name(), err)
+			}
+			if t.installSubnetRouteForwarders(t.ctx) {
+				subnetForwarderInstalled = true
+			}
+		}
+	}
 
 	refreshFromLocalClient := func() string {
 		ctx, cancel := context.WithTimeout(t.ctx, 3*time.Second)
@@ -576,6 +599,9 @@ func (t *Tailscale) watchBackendState() {
 	}
 
 	currentState := refreshFromLocalClient()
+	if currentState == ipn.Running.String() {
+		ensureRunningFeatures()
+	}
 	tickerInterval := 3 * time.Second
 	if currentState == ipn.Running.String() {
 		tickerInterval = 30 * time.Second
@@ -623,19 +649,28 @@ func (t *Tailscale) watchBackendState() {
 					t.setBackendInitialized(nil)
 					backendInitialized = true
 				}
-				if exitNodeNeedsStatus && !exitNodeApplied && *n.State == ipn.Running {
-					if err := t.applyExitNodePrefs(t.ctx); err != nil {
-						log.Warnln("[Tailscale](%s) set exit node failed: %v", t.Name(), err)
-						t.recordLog(fmt.Sprintf("set exit node failed: %v", err), true)
-					} else {
-						exitNodeApplied = true
+				if *n.State == ipn.Running {
+					ensureRunningFeatures()
+					if exitNodeNeedsStatus && !exitNodeApplied {
+						if err := t.applyExitNodePrefs(t.ctx); err != nil {
+							log.Warnln("[Tailscale](%s) set exit node failed: %v", t.Name(), err)
+							t.recordLog(fmt.Sprintf("set exit node failed: %v", err), true)
+						} else {
+							exitNodeApplied = true
+						}
 					}
 				}
 				state := refreshFromLocalClient()
+				if state == ipn.Running.String() {
+					ensureRunningFeatures()
+				}
 				updateTicker(state)
 			}
 		case <-ticker.C:
 			state := refreshFromLocalClient()
+			if state == ipn.Running.String() {
+				ensureRunningFeatures()
+			}
 			updateTicker(state)
 		}
 	}
@@ -710,6 +745,15 @@ func buildTailscaleMaskedPrefs(option TailscaleOption) (*ipn.MaskedPrefs, error)
 		mp.RouteAllSet = true
 		changed = true
 	}
+	if option.AdvertiseRoutes != nil {
+		prefixes, err := parseTailscaleAdvertiseRoutes(option.AdvertiseRoutes)
+		if err != nil {
+			return nil, err
+		}
+		mp.AdvertiseRoutes = prefixes
+		mp.AdvertiseRoutesSet = true
+		changed = true
+	}
 	if option.ExitNode != "" {
 		if autoExitNode, ok := ipn.ParseAutoExitNodeString(option.ExitNode); ok {
 			mp.AutoExitNode = autoExitNode
@@ -734,6 +778,81 @@ func tailscaleExitNodeNeedsStatus(option TailscaleOption) bool {
 	}
 	_, ok := ipn.ParseAutoExitNodeString(option.ExitNode)
 	return !ok
+}
+
+func parseTailscaleAdvertiseRoutes(raw []string) ([]netip.Prefix, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make([]netip.Prefix, 0, len(raw))
+	seen := make(map[netip.Prefix]bool, len(raw))
+	for _, entry := range raw {
+		s := strings.TrimSpace(entry)
+		if s == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return nil, fmt.Errorf("invalid tailscale advertise-route %q: %w", s, err)
+		}
+		p = p.Masked()
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+func (t *Tailscale) isAdvertisedSubnetIP(ip netip.Addr) bool {
+	if !ip.IsValid() || tsaddr.IsTailscaleIP(ip) {
+		return false
+	}
+	u := ip.Unmap()
+	for _, p := range t.advertisePrefixes {
+		if p.Contains(u) {
+			return true
+		}
+	}
+	return false
+}
+
+// installSubnetRouteForwarders allows tsnet's netstack to forward inbound TCP/UDP
+// connections targeting explicitly advertised non-Tailscale subnet CIDRs (e.g. 10.10.1.0/24)
+// to the host/LAN via SystemDial, while keeping all Tailscale self-IP traffic closed by default.
+func (t *Tailscale) installSubnetRouteForwarders(ctx context.Context) bool {
+	if len(t.advertisePrefixes) == 0 || t.server == nil {
+		return true
+	}
+	nsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	ns, err := t.server.Netstack(nsCtx)
+	if err != nil || ns == nil {
+		log.Warnln("[Tailscale](%s) enable subnet route forwarder failed: %v", t.Name(), err)
+		return false
+	}
+	origTCP := ns.GetTCPHandlerForFlow
+	ns.GetTCPHandlerForFlow = func(src, dst netip.AddrPort) (func(net.Conn), bool) {
+		if t.isAdvertisedSubnetIP(dst.Addr()) {
+			return nil, false
+		}
+		if origTCP != nil {
+			return origTCP(src, dst)
+		}
+		return nil, true
+	}
+	origUDP := ns.GetUDPHandlerForFlow
+	ns.GetUDPHandlerForFlow = func(src, dst netip.AddrPort) (func(nettype.ConnPacketConn), bool) {
+		if t.isAdvertisedSubnetIP(dst.Addr()) {
+			return nil, false
+		}
+		if origUDP != nil {
+			return origUDP(src, dst)
+		}
+		return nil, true
+	}
+	log.Infoln("[Tailscale](%s) enabled subnet router forwarding for %v", t.Name(), t.advertisePrefixes)
+	return true
 }
 
 func (t *Tailscale) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {

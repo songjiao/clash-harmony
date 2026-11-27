@@ -94,6 +94,22 @@
   .btn-amber { background: rgba(245,158,11,.16); border-color: rgba(245,158,11,.4); color: #fcd34d; }
   .btn-sm { padding: 5px 10px; font-size: 12px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+  @media (max-width: 760px) {
+    .layout { flex-direction: column; }
+    .sidebar {
+      width: 100%; flex-direction: row; flex-wrap: nowrap; overflow-x: auto;
+      padding: 8px 10px; gap: 6px; border-right: none; border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 20; align-items: center;
+    }
+    .brand, .sidebar-foot { display: none !important; }
+    .nav-btn { width: auto; white-space: nowrap; padding: 7px 11px; font-size: 13px; flex-shrink: 0; }
+    .main { padding: 12px 10px 40px; }
+    .topbar { margin-bottom: 12px; }
+    .topbar h2 { font-size: 17px; }
+    .grid { grid-template-columns: 1fr; }
+    .card { padding: 13px; }
+  }
+  body.platform-android .win-only { display: none !important; }
   .card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -435,14 +451,14 @@
             </div>
             <button class="btn btn-sm" onclick="switchTab('profiles')">切换</button>
           </div>
-          <div class="row">
+          <div class="row win-only">
             <div>
               <div>系统代理 (127.0.0.1:<span id="ovPort">7890</span>)</div>
               <div class="muted">免管理员，浏览器自动接管（含内网域）</div>
             </div>
             <label class="switch"><input type="checkbox" id="swSysProxy"><span class="slider"></span></label>
           </div>
-          <div class="row">
+          <div class="row win-only">
             <div>
               <div>TUN 全局接管 (Wintun)</div>
               <div class="muted" id="ovTunHint">终端 / agy CLI / SSH / IDE 全量透明代理与组网</div>
@@ -452,7 +468,7 @@
               <label class="switch"><input type="checkbox" id="swTun"><span class="slider"></span></label>
             </div>
           </div>
-          <div class="row">
+          <div class="row win-only">
             <div>
               <div>Strict Route 防 DNS/IPv6 泄漏</div>
               <div class="muted">通过 Windows WFP 强制 CLI 流量和 DNS 走 TUN（强烈推荐）</div>
@@ -466,7 +482,7 @@
             </div>
             <label class="switch"><input type="checkbox" id="swBlockQuic"><span class="slider"></span></label>
           </div>
-          <div class="row">
+          <div class="row win-only">
             <div>
               <div>TUN 协议栈</div>
               <div class="muted">Windows 推荐 mixed（TCP 原生栈 + UDP gVisor）</div>
@@ -477,7 +493,7 @@
               <option value="gvisor">gvisor</option>
             </select>
           </div>
-          <div class="row">
+          <div class="row win-only">
             <div>
               <div>开机自启 (Windows 登录自动后台运行)</div>
               <div class="muted">写入当前用户启动项</div>
@@ -636,6 +652,10 @@
           <div class="field">
             <label>SplitDNS 域名列表（逗号分隔，自动同步后会保留）</label>
             <input type="text" id="tsPrefDomains" placeholder="in.sjfarm.cc, q.sjfarm.cc" />
+          </div>
+          <div class="field">
+            <label>广播本机子网路由 (advertise-routes，逗号分隔，如 10.10.1.0/24；需在 Tailscale 后台勾选批准)</label>
+            <input type="text" id="tsPrefAdvertiseRoutes" placeholder="例如 10.10.1.0/24（留空不广播）" />
           </div>
           <button class="btn btn-primary" id="btnSaveTsPrefs">保存并重启核心生效</button>
         </div>
@@ -815,7 +835,10 @@
           </div>
           <div class="field">
             <label>Clash / Mihomo YAML 订阅地址</label>
-            <input type="text" id="impUrl" placeholder="https://..." />
+            <div class="inline-form">
+              <input type="text" id="impUrl" placeholder="https://..." />
+              <button class="btn btn-sm" id="btnScanImpUrl" style="display:none;white-space:nowrap;" onclick="window.AndroidBridge && window.AndroidBridge.scanQr('url')">📷 扫码</button>
+            </div>
           </div>
           <div class="field">
             <label>拉取方式（解决国内/海外订阅 IP 限制）</label>
@@ -1018,6 +1041,13 @@ async function loadState() {
     }
   }
 
+  if (data.platform === 'android') {
+    document.body.classList.add('platform-android');
+  }
+  if (window.AndroidBridge) {
+    const scanBtn = document.getElementById('btnScanImpUrl');
+    if (scanBtn) scanBtn.style.display = 'inline-block';
+  }
   document.getElementById('ovProfile').textContent = data.activeProfileName || '未导入配置';
   document.getElementById('ovPort').textContent = data.mixedPort || 7890;
   document.getElementById('ovMeta').textContent = `${data.controllerAddr} | ${data.coreVersion}`;
@@ -1088,6 +1118,10 @@ document.querySelectorAll('#modeSeg button').forEach(b => {
 });
 
 async function handleToggleCoreAction() {
+  if (window.AndroidBridge && window.AndroidBridge.toggleVpn) {
+    window.AndroidBridge.toggleVpn();
+    return;
+  }
   const path = (lastState && lastState.running) ? '/api/core/stop' : '/api/core/start';
   const heroBtn = document.getElementById('btnHeroToggle');
   const topBtn = document.getElementById('btnToggleCore');
@@ -1241,27 +1275,52 @@ async function loadTailscaleStatus() {
   (data.health || []).forEach(h => warnings.push(h));
   healthEl.textContent = warnings.join(' | ');
 
-  // Render Tailscale tab tables
+  // Render Tailscale tab tables (pin Self node at the top, followed by remote peers)
   const tbody = document.getElementById('tsPeersBody');
   const peers = data.peers || [];
-  if (peers.length === 0) {
+  const selfIPs = data.tailscaleIPs || [];
+  const selfIP4 = selfIPs[0] || '';
+  const selfIP6 = selfIPs[1] || '';
+  const rows = [];
+  if (data.hostname || selfIP4) {
+    const selfOnline = st === 'Running';
+    const approvedSet = new Set(data.selfPrimaryRoutes || []);
+    const advList = (data.selfAdvertiseRoutes && data.selfAdvertiseRoutes.length > 0)
+      ? data.selfAdvertiseRoutes
+      : (data.selfPrimaryRoutes || []);
+    const selfRoutesHtml = advList.length > 0
+      ? advList.map(r => approvedSet.has(r)
+        ? `<span class="badge ok">${esc(r)} 已批准</span>`
+        : `<span class="badge warn">${esc(r)} 待后台批准</span>`).join(' ')
+      : '-';
+    rows.push(`<tr style="background:rgba(16,185,129,0.08);">
+      <td><b>${esc(data.hostname || '本机')}</b> <span class="badge info">本机</span><div class="muted mono">${esc(data.loginName || '')}</div></td>
+      <td class="mono">${esc(selfIP4 || '-')}${selfIP6 ? `<div class="muted" style="font-size:11px;">${esc(selfIP6)}</div>` : ''}</td>
+      <td><span class="badge ${selfOnline ? 'ok' : 'warn'}">${selfOnline ? '本机在线' : esc(st)}</span></td>
+      <td class="mono">本机 tsnet</td>
+      <td class="mono">${selfRoutesHtml}</td>
+      <td>${selfIP4 ? `<button class="btn btn-sm" onclick="copyText('${esc(selfIP4)}', '已复制本机 Tailscale IP')">复制 IP</button>` : '-'}</td>
+    </tr>`);
+  }
+  peers.forEach(p => {
+    const ip = (p.tailscaleIPs || [])[0] || '';
+    const path = p.curAddr ? `直连 ${esc(p.curAddr)}` : (p.relay ? `DERP ${esc(p.relay)}` : '-');
+    const routes = (p.primaryRoutes || []).join(', ') || '-';
+    const cachedPing = ip ? peerPingCache[ip] : null;
+    const pingLabel = cachedPing ? cachedPing : 'Ping';
+    rows.push(`<tr>
+      <td><b>${esc(p.hostName)}</b><div class="muted mono">${esc(p.dnsName)}</div></td>
+      <td class="mono">${esc(ip)}</td>
+      <td><span class="badge ${p.online ? 'ok' : ''}">${p.online ? '在线' : '离线'}</span></td>
+      <td class="mono">${path}</td>
+      <td class="mono">${esc(routes)}</td>
+      <td>${ip ? `<button class="btn btn-sm" id="pingBtn-${esc(ip.replace(/[^a-zA-Z0-9]/g,'_'))}" onclick="pingPeer('${esc(ip)}', this)">${esc(pingLabel)}</button>` : '-'}</td>
+    </tr>`);
+  });
+  if (rows.length === 0) {
     tbody.innerHTML = '<tr><td colspan="6" class="muted">暂无节点数据（请先启动核心并登录 Tailscale）</td></tr>';
   } else {
-    tbody.innerHTML = peers.map(p => {
-      const ip = (p.tailscaleIPs || [])[0] || '';
-      const path = p.curAddr ? `直连 ${esc(p.curAddr)}` : (p.relay ? `DERP ${esc(p.relay)}` : '-');
-      const routes = (p.primaryRoutes || []).join(', ') || '-';
-      const cachedPing = ip ? peerPingCache[ip] : null;
-      const pingLabel = cachedPing ? cachedPing : 'Ping';
-      return `<tr>
-        <td><b>${esc(p.hostName)}</b><div class="muted mono">${esc(p.dnsName)}</div></td>
-        <td class="mono">${esc(ip)}</td>
-        <td><span class="badge ${p.online ? 'ok' : ''}">${p.online ? '在线' : '离线'}</span></td>
-        <td class="mono">${path}</td>
-        <td class="mono">${esc(routes)}</td>
-        <td>${ip ? `<button class="btn btn-sm" id="pingBtn-${esc(ip.replace(/[^a-zA-Z0-9]/g,'_'))}" onclick="pingPeer('${esc(ip)}', this)">${esc(pingLabel)}</button>` : '-'}</td>
-      </tr>`;
-    }).join('');
+    tbody.innerHTML = rows.join('');
   }
 
   const splitBox = document.getElementById('tsSplitTable');
@@ -1367,10 +1426,26 @@ async function loadTsPrefs() {
   document.getElementById('tsPrefControl').value = data.controlUrl || '';
   document.getElementById('tsPrefAuthKey').value = data.authKey || '';
   document.getElementById('tsPrefDomains').value = (data.splitDnsDomains || []).join(', ');
+  document.getElementById('tsPrefAdvertiseRoutes').value = (data.advertiseRoutes || []).join(', ');
+}
+
+function copyText(text, msg) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => toast(msg || '已复制')).catch(() => toast('复制失败', true));
+  } else {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); toast(msg || '已复制'); } catch (_) { toast('复制失败', true); }
+    document.body.removeChild(ta);
+  }
 }
 
 document.getElementById('btnSaveTsPrefs').addEventListener('click', async () => {
   const domains = document.getElementById('tsPrefDomains').value
+    .split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
+  const advertiseRoutes = document.getElementById('tsPrefAdvertiseRoutes').value
     .split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
   const prefs = {
     managedByApp: document.getElementById('tsPrefManaged').checked,
@@ -1385,7 +1460,8 @@ document.getElementById('btnSaveTsPrefs').addEventListener('click', async () => 
     autoInjectMagicDns: document.getElementById('tsPrefSplit').checked,
     tailnetSuffix: (lastTsStatus && lastTsStatus.magicDnsSuffix) || '',
     autoSyncSplitDns: document.getElementById('tsPrefSplit').checked,
-    splitDnsDomains: domains
+    splitDnsDomains: domains,
+    advertiseRoutes: advertiseRoutes
   };
   const { ok, data } = await api('/api/tailscale/prefs', {
     method: 'POST',
@@ -2465,6 +2541,43 @@ document.getElementById('qrSyncIpSel').addEventListener('change', (e) => openQrS
 document.getElementById('qrSyncBackdrop').addEventListener('click', (e) => {
   if (e.target.id === 'qrSyncBackdrop') closeQrSyncModal();
 });
+
+// Android WebView JS bridge callback for QR scanning (PC sync or subscription URL)
+window.onAndroidQrResult = async function(mode, rawText) {
+  const val = (rawText || '').trim();
+  if (!val) return;
+  if (mode === 'url') {
+    let extractedUrl = val;
+    let extractedName = '';
+    if (/^(clash|clashmeta|mihomo):\/\//i.test(val)) {
+      try {
+        const q = val.split('?')[1] || '';
+        const sp = new URLSearchParams(q);
+        if (sp.get('url')) extractedUrl = sp.get('url').trim();
+        if (sp.get('name')) extractedName = sp.get('name').trim();
+      } catch (_) {}
+    }
+    const uEl = document.getElementById('impUrl');
+    if (uEl) uEl.value = extractedUrl;
+    const nEl = document.getElementById('impUrlName');
+    if (nEl && !nEl.value.trim() && extractedName) nEl.value = extractedName;
+    toast('已扫码填入订阅 URL');
+    return;
+  }
+  toast('正在从电脑拉取同步配置...');
+  const { ok, data } = await api('/api/sync/import-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ qrText: val })
+  });
+  toast(ok ? (data.message || '同步电脑配置成功！') : (data.error || '同步失败'), !ok);
+  if (ok) {
+    loadProfiles();
+    loadOverlay();
+    loadTsPrefs();
+    loadState();
+  }
+};
 
 // Initial load & live polling
 loadState().then(() => {

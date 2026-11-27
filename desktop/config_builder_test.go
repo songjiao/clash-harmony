@@ -641,3 +641,29 @@ func TestNormalizeFetchedSubscription_HandlesBase64URIsAndBase64YAMLAndErrors(t 
 		t.Fatalf("expected Surge INI error, got: %v", err)
 	}
 }
+
+func TestBuildRuntimeYAML_AdvertiseRoutesForSubnetRouter(t *testing.T) {
+	baseYAML := `mode: rule
+proxies:
+  - { name: HK-1, type: ss, server: hk.example.com, port: 443, cipher: aes-128-gcm, password: secret }
+proxy-groups:
+  - name: Proxy
+    type: select
+    proxies:
+      - HK-1
+rules:
+  - MATCH,Proxy
+`
+	ts := defaultTailscalePrefs()
+	ts.AdvertiseRoutes = []string{"10.10.1.0/24"}
+	out, err := BuildRuntimeYAMLWithOverlay(baseYAML, defaultCustomOverlay(), ts, defaultAppSettings())
+	if err != nil {
+		t.Fatalf("BuildRuntimeYAMLWithOverlay failed: %v", err)
+	}
+	if !strings.Contains(out, "advertise-routes:\n      - 10.10.1.0/24") {
+		t.Fatalf("expected advertise-routes in generated YAML:\n%s", out)
+	}
+	if _, err := config.Parse([]byte(out)); err != nil {
+		t.Fatalf("config.Parse failed with advertise-routes: %v\n%s", err, out)
+	}
+}

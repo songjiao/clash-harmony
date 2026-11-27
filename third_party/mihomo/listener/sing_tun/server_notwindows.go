@@ -1,4 +1,4 @@
-//go:build !windows && !openharmony
+//go:build !windows && !openharmony && !android
 
 package sing_tun
 

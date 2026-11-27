@@ -27,5 +27,12 @@ app/local.properties
 *.har
 *.log
 *.exe
+*.apk
+*.jks
 desktop/dist/
+android/build/
+android/dist/
+android/libs/
+android/assets/
+android/third_party/
 .DS_Store
