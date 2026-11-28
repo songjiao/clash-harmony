@@ -4,14 +4,26 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.net.ConnectivityManager;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.RouteInfo;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.ParcelFileDescriptor;
+import android.os.PowerManager;
+import android.os.SystemClock;
 import android.util.Log;
 
 import java.io.IOException;
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -19,6 +31,10 @@ public class ClashVpnService extends VpnService {
     private static final String TAG = "ClashHarmonyVPN";
     private static final String CHANNEL_ID = "clash_harmony_vpn";
     private static final int NOTIF_ID = 1001;
+    private static final int MOBILE_TUN_MTU = 1360;
+
+    private static final int FLAG_REBIND_TS = 1;
+    private static final int FLAG_PRUNE_NON_TS = 2;
 
     public static final String ACTION_START = "com.sjfarmltd.clashharmony.ACTION_START_VPN";
     public static final String ACTION_STOP = "com.sjfarmltd.clashharmony.ACTION_STOP_VPN";
@@ -31,6 +47,52 @@ public class ClashVpnService extends VpnService {
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private ParcelFileDescriptor vpnInterface;
+
+    private ConnectivityManager connectivityManager;
+    private ConnectivityManager.NetworkCallback networkCallback;
+    private boolean screenReceiverRegistered = false;
+
+    private volatile Network activeUnderlyingNetwork;
+    private volatile String lastIfaceName = "";
+    private volatile String lastGateway = "";
+    private volatile String lastTransport = "";
+    private volatile boolean hasBaselineNetwork = false;
+    private volatile boolean wasOffline = false;
+    private volatile long screenOffAtMs = 0L;
+
+    private final BroadcastReceiver screenStateReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent == null || intent.getAction() == null) {
+                return;
+            }
+            String action = intent.getAction();
+            if (Intent.ACTION_SCREEN_OFF.equals(action)) {
+                screenOffAtMs = SystemClock.elapsedRealtime();
+            } else if (Intent.ACTION_SCREEN_ON.equals(action) || Intent.ACTION_USER_PRESENT.equals(action)) {
+                long offAt = screenOffAtMs;
+                if (!isRunning || offAt <= 0L) {
+                    return;
+                }
+                screenOffAtMs = 0L;
+                long sleptMs = SystemClock.elapsedRealtime() - offAt;
+                if (sleptMs < 30_000L) {
+                    return;
+                }
+                final int flags = sleptMs >= 45_000L ? FLAG_REBIND_TS : 0;
+                final String reason = "screen-wake-" + (sleptMs / 1000L) + "s";
+                final String iface = lastIfaceName;
+                final String gw = lastGateway;
+                executor.execute(() -> {
+                    if (!isRunning) {
+                        return;
+                    }
+                    acquireTransientWakeLock(4000L);
+                    CoreProcessManager.sendNetworkChange(iface, gw, flags, reason);
+                });
+            }
+        }
+    };
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -45,6 +107,7 @@ public class ClashVpnService extends VpnService {
     }
 
     private void startVpnInternal() {
+        unregisterMobilityMonitors();
         closeInterface();
         lastError = "";
 
@@ -55,7 +118,7 @@ public class ClashVpnService extends VpnService {
 
         Builder builder = new Builder();
         builder.setSession("Clash Harmony");
-        builder.setMtu(1500);
+        builder.setMtu(MOBILE_TUN_MTU);
         builder.addAddress("198.18.0.1", 16);
         builder.addRoute("0.0.0.0", 0);
         builder.addDnsServer("198.18.0.2");
@@ -84,12 +147,14 @@ public class ClashVpnService extends VpnService {
 
         isRunning = true;
         lastError = "";
-        startForegroundNotification("VPN 已连接 · Mihomo + Tailscale 运行中");
+        registerMobilityMonitors();
+        startForegroundNotification("VPN 已连接 · 漫游守护运行中");
         broadcastState(true, "");
-        Log.i(TAG, "VPN started and TUN attached successfully");
+        Log.i(TAG, "VPN started and TUN attached successfully (mtu=" + MOBILE_TUN_MTU + ")");
     }
 
     private void stopVpnInternal() {
+        unregisterMobilityMonitors();
         CoreProcessManager.sendStopVpn();
         closeInterface();
         isRunning = false;
@@ -104,6 +169,7 @@ public class ClashVpnService extends VpnService {
     }
 
     private void failStart(String err) {
+        unregisterMobilityMonitors();
         isRunning = false;
         lastError = err != null ? err : "VPN 启动失败";
         broadcastState(false, lastError);
@@ -112,6 +178,213 @@ public class ClashVpnService extends VpnService {
         } catch (Exception ignored) {
         }
         stopSelf();
+    }
+
+    private void registerMobilityMonitors() {
+        hasBaselineNetwork = false;
+        wasOffline = false;
+        activeUnderlyingNetwork = null;
+        lastIfaceName = "";
+        lastGateway = "";
+        lastTransport = "";
+        screenOffAtMs = 0L;
+
+        connectivityManager = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+        if (connectivityManager != null) {
+            networkCallback = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    executor.execute(() -> handleNetworkEvent(network, null, null, "available"));
+                }
+
+                @Override
+                public void onLinkPropertiesChanged(Network network, LinkProperties linkProperties) {
+                    executor.execute(() -> handleNetworkEvent(network, linkProperties, null, "link-props"));
+                }
+
+                @Override
+                public void onCapabilitiesChanged(Network network, NetworkCapabilities networkCapabilities) {
+                    executor.execute(() -> handleNetworkEvent(network, null, networkCapabilities, "capabilities"));
+                }
+
+                @Override
+                public void onLost(Network network) {
+                    executor.execute(() -> handleNetworkLost(network));
+                }
+            };
+            try {
+                connectivityManager.registerDefaultNetworkCallback(networkCallback);
+                Network active = connectivityManager.getActiveNetwork();
+                if (active != null) {
+                    handleNetworkEvent(active, null, null, "initial");
+                }
+                Log.i(TAG, "Registered Android default NetworkCallback for seamless roaming");
+            } catch (Exception e) {
+                Log.w(TAG, "registerDefaultNetworkCallback failed: " + e.getMessage());
+                networkCallback = null;
+            }
+        }
+
+        if (!screenReceiverRegistered) {
+            try {
+                IntentFilter filter = new IntentFilter();
+                filter.addAction(Intent.ACTION_SCREEN_OFF);
+                filter.addAction(Intent.ACTION_SCREEN_ON);
+                filter.addAction(Intent.ACTION_USER_PRESENT);
+                registerReceiver(screenStateReceiver, filter);
+                screenReceiverRegistered = true;
+            } catch (Exception e) {
+                Log.w(TAG, "registerReceiver(screen) failed: " + e.getMessage());
+            }
+        }
+    }
+
+    private void unregisterMobilityMonitors() {
+        if (connectivityManager != null && networkCallback != null) {
+            try {
+                connectivityManager.unregisterNetworkCallback(networkCallback);
+            } catch (Exception ignored) {
+            }
+            networkCallback = null;
+        }
+        if (screenReceiverRegistered) {
+            try {
+                unregisterReceiver(screenStateReceiver);
+            } catch (Exception ignored) {
+            }
+            screenReceiverRegistered = false;
+        }
+        activeUnderlyingNetwork = null;
+        hasBaselineNetwork = false;
+        wasOffline = false;
+        screenOffAtMs = 0L;
+    }
+
+    private void handleNetworkEvent(Network network, LinkProperties lpArg, NetworkCapabilities capsArg, String trigger) {
+        if (!isRunning || network == null || connectivityManager == null) {
+            return;
+        }
+        NetworkCapabilities caps = capsArg != null ? capsArg : connectivityManager.getNetworkCapabilities(network);
+        if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+            return;
+        }
+        LinkProperties lp = lpArg != null ? lpArg : connectivityManager.getLinkProperties(network);
+        if (lp == null) {
+            return;
+        }
+        String ifaceName = lp.getInterfaceName();
+        if (ifaceName == null) {
+            ifaceName = "";
+        }
+        ifaceName = ifaceName.trim();
+        if (ifaceName.isEmpty() || ifaceName.startsWith("tun") || ifaceName.startsWith("vpn")) {
+            return;
+        }
+        String gateway = extractDefaultIPv4Gateway(lp);
+        String transport = describeTransport(caps);
+
+        if (!hasBaselineNetwork) {
+            hasBaselineNetwork = true;
+            wasOffline = false;
+            activeUnderlyingNetwork = network;
+            lastIfaceName = ifaceName;
+            lastGateway = gateway;
+            lastTransport = transport;
+            CoreProcessManager.sendNetworkChange(ifaceName, gateway, 0, "baseline-" + transport);
+            return;
+        }
+
+        boolean changed = wasOffline
+                || !ifaceName.equals(lastIfaceName)
+                || (!gateway.isEmpty() && !gateway.equals(lastGateway))
+                || (!transport.isEmpty() && !transport.equals(lastTransport));
+        if (!changed) {
+            activeUnderlyingNetwork = network;
+            return;
+        }
+
+        String reason;
+        if (wasOffline) {
+            reason = "recover-" + transport;
+        } else if (!transport.equals(lastTransport) && !lastTransport.isEmpty()) {
+            reason = "switch-" + lastTransport + "-to-" + transport;
+        } else if (!ifaceName.equals(lastIfaceName)) {
+            reason = "iface-" + lastIfaceName + "-to-" + ifaceName;
+        } else {
+            reason = "route-" + transport + "-" + trigger;
+        }
+
+        activeUnderlyingNetwork = network;
+        lastIfaceName = ifaceName;
+        lastGateway = gateway;
+        lastTransport = transport;
+        wasOffline = false;
+
+        acquireTransientWakeLock(5000L);
+        CoreProcessManager.sendNetworkChange(ifaceName, gateway, FLAG_REBIND_TS | FLAG_PRUNE_NON_TS, reason);
+    }
+
+    private void handleNetworkLost(Network network) {
+        if (!isRunning || network == null) {
+            return;
+        }
+        if (activeUnderlyingNetwork != null && !activeUnderlyingNetwork.equals(network)) {
+            return;
+        }
+        wasOffline = true;
+        activeUnderlyingNetwork = null;
+        CoreProcessManager.sendNetworkChange("", "", 0, "net-lost");
+    }
+
+    private String extractDefaultIPv4Gateway(LinkProperties lp) {
+        if (lp == null) {
+            return "";
+        }
+        try {
+            for (RouteInfo route : lp.getRoutes()) {
+                if (route == null || !route.isDefaultRoute()) {
+                    continue;
+                }
+                InetAddress gw = route.getGateway();
+                if (gw instanceof Inet4Address && !gw.isAnyLocalAddress()) {
+                    String host = gw.getHostAddress();
+                    if (host != null && !host.isEmpty()) {
+                        return host;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return "";
+    }
+
+    private String describeTransport(NetworkCapabilities caps) {
+        if (caps == null) {
+            return "net";
+        }
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+            return "wifi";
+        }
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+            return "cellular";
+        }
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) {
+            return "ethernet";
+        }
+        return "other";
+    }
+
+    private void acquireTransientWakeLock(long timeoutMs) {
+        try {
+            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+            if (pm != null) {
+                PowerManager.WakeLock wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ClashHarmony:NetRebind");
+                wl.setReferenceCounted(false);
+                wl.acquire(timeoutMs);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "acquireTransientWakeLock ignored: " + e.getMessage());
+        }
     }
 
     private void closeInterface() {
@@ -174,7 +447,10 @@ public class ClashVpnService extends VpnService {
 
     @Override
     public void onDestroy() {
-        executor.execute(this::closeInterface);
+        executor.execute(() -> {
+            unregisterMobilityMonitors();
+            closeInterface();
+        });
         super.onDestroy();
     }
 }

@@ -5,12 +5,14 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
 	N "github.com/metacubex/mihomo/common/net"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
+	"github.com/metacubex/mihomo/tunnel/statistic"
 )
 
 type packetSender struct {
@@ -218,5 +220,31 @@ func closeAllLocalCoon(lAddr string) {
 }
 
 func handleSocket(inbound, outbound net.Conn) {
+	if tr, ok := outbound.(statistic.Tracker); ok {
+		info := tr.Info()
+		if info != nil && info.Metadata != nil {
+			isTS := false
+			for _, hop := range info.Chain {
+				if strings.EqualFold(strings.TrimSpace(hop), "tailscale") {
+					isTS = true
+					break
+				}
+			}
+			if isTS {
+				started := time.Now()
+				src := info.Metadata.SourceDetail()
+				dst := info.Metadata.RemoteAddress()
+				N.RelayWithCloseHook(inbound, outbound, func(side string, err error) {
+					cause := "EOF(FIN)"
+					if err != nil {
+						cause = err.Error()
+					}
+					log.Infoln("[Tailscale-TCP] closed %s --> %s firstSide=%s cause=%s dur=%s",
+						src, dst, side, cause, time.Since(started).Round(time.Millisecond))
+				})
+				return
+			}
+		}
+	}
 	N.Relay(inbound, outbound)
 }

@@ -222,6 +222,14 @@ export class CoreBridgeService {
     }
   }
 
+  static notifyNetworkChange(ifaceName: string, reason: string, flags: number): boolean {
+    try {
+      return nativeCore.notifyNetworkChange(ifaceName, reason, flags) === 0;
+    } catch (_err) {
+      return false;
+    }
+  }
+
   static validateConfig(yamlText: string): ConfigValidationResult {
     try {
       const rawJson: string = nativeCore.validateConfig(yamlText);

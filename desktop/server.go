@@ -93,6 +93,40 @@ func (s *DesktopServer) buildMux() http.Handler {
 		writeJSON(w, http.StatusOK, s.engine.State())
 	})
 
+	// Mobile / roaming network-change trigger & stats
+	mux.HandleFunc("/api/network/rebind", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "stats": mobileNetCoordinator.Stats()})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		var req struct {
+			IfaceName         string `json:"ifaceName"`
+			Gateway           string `json:"gateway"`
+			Reason            string `json:"reason"`
+			RebindTailscale   *bool  `json:"rebindTailscale"`
+			PruneNonTailscale *bool  `json:"pruneNonTailscale"`
+		}
+		_ = json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&req)
+		rebindTS := true
+		if req.RebindTailscale != nil {
+			rebindTS = *req.RebindTailscale
+		}
+		pruneNonTS := false
+		if req.PruneNonTailscale != nil {
+			pruneNonTS = *req.PruneNonTailscale
+		}
+		reason := strings.TrimSpace(req.Reason)
+		if reason == "" {
+			reason = "api-rebind"
+		}
+		s.engine.NotifyNetworkChange(req.IfaceName, req.Gateway, reason, rebindTS, pruneNonTS)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "stats": mobileNetCoordinator.Stats()})
+	})
+
 	// Core lifecycle
 	mux.HandleFunc("/api/core/start", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

@@ -77,19 +77,21 @@ type Monitor struct {
 	b       *eventbus.Client
 	changed *eventbus.Publisher[ChangeDelta]
 
-	om     osMon         // nil means not supported on this platform
-	change chan bool     // send false to wake poller, true to also force ChangeDeltas be sent
-	stop   chan struct{} // closed on Stop
-	static bool          // static Monitor that doesn't actually monitor
+	om         osMon         // nil means not supported on this platform
+	change     chan bool     // send false to wake poller, true to also force ChangeDeltas be sent
+	rebindWake chan struct{} // buffered(1): interrupts debounce cooldown on explicit host rebind
+	stop       chan struct{} // closed on Stop
+	static     bool          // static Monitor that doesn't actually monitor
 
-	mu           syncs.Mutex // guards all following fields
-	cbs          set.HandleSet[ChangeFunc]
-	ifState      *State
-	gwValid      bool       // whether gw and gwSelfIP are valid
-	gw           netip.Addr // our gateway's IP
-	gwSelfIP     netip.Addr // our own IP address (that corresponds to gw)
-	started      bool
-	closed       bool
+	mu                 syncs.Mutex // guards all following fields
+	cbs                set.HandleSet[ChangeFunc]
+	ifState            *State
+	gwValid            bool // whether gw and gwSelfIP are valid
+	gw                 netip.Addr
+	gwSelfIP           netip.Addr
+	started            bool
+	closed             bool
+	forceRebindPending bool
 	goroutines   sync.WaitGroup
 	wallTimer    *time.Timer // nil until Started; re-armed AfterFunc per tick
 	lastWall     time.Time
@@ -202,7 +204,13 @@ func NewChangeDelta(old, new *State, jumpDuration time.Duration, forceViability 
 	// warrants a rebind even if the local state looks the same, because NAT
 	// mappings are likely stale and DHCP leases may have changed (the renewal
 	// happens after wake, so local state may not yet reflect it).
-	majorTimeJump := cd.JumpDuration >= majorTimeJumpThreshold
+	timeJumpThreshold := majorTimeJumpThreshold
+	if isHarmonyOS || runtime.GOOS == "android" {
+		// Mobile carrier/Wi-Fi NAT mappings expire much faster than desktop DHCP leases;
+		// treat sleeps over 60s as major so MagicSock rebinds UDP/DERP sockets promptly.
+		timeJumpThreshold = 60 * time.Second
+	}
+	majorTimeJump := cd.JumpDuration >= timeJumpThreshold
 	cd.RebindLikelyRequired = (cd.old == nil ||
 		majorTimeJump ||
 		cd.DefaultInterfaceChanged ||
@@ -380,11 +388,12 @@ func filterRoutableIPs(addrs []netip.Prefix) []netip.Prefix {
 func New(bus *eventbus.Bus, logf logger.Logf) (*Monitor, error) {
 	logf = logger.WithPrefix(logf, "monitor: ")
 	m := &Monitor{
-		logf:     logf,
-		b:        bus.Client("netmon"),
-		change:   make(chan bool, 1),
-		stop:     make(chan struct{}),
-		lastWall: wallTime(),
+		logf:       logf,
+		b:          bus.Client("netmon"),
+		change:     make(chan bool, 1),
+		rebindWake: make(chan struct{}, 1),
+		stop:       make(chan struct{}),
+		lastWall:   wallTime(),
 	}
 	m.changed = eventbus.Publish[ChangeDelta](m.b)
 	st, err := m.interfaceStateUncached()
@@ -557,6 +566,24 @@ func (m *Monitor) InjectEvent() {
 	}
 }
 
+// InjectRebind forces an immediate interface-state refresh and marks the
+// resulting ChangeDelta with RebindLikelyRequired=true (when any interface is
+// up), interrupting any debounce cooldown so MagicSock rebinds once against
+// the fresh interface IPs instead of racing against stale state.
+func (m *Monitor) InjectRebind() {
+	if m.static {
+		return
+	}
+	m.mu.Lock()
+	m.forceRebindPending = true
+	m.mu.Unlock()
+	m.InjectEvent()
+	select {
+	case m.rebindWake <- struct{}{}:
+	default:
+	}
+}
+
 // Poll forces the monitor to pretend there was a network
 // change and re-check the state of the network.
 //
@@ -624,6 +651,8 @@ func (m *Monitor) debounce() {
 		select {
 		case <-m.stop:
 			return
+		case <-m.rebindWake:
+			// Explicit host OS rebind hint: skip remaining cooldown.
 		// 1s is reasonable debounce time for network changes.  Events such as undocking a laptop
 		// or roaming onto wifi will often generate multiple events in quick succession as interfaces
 		// flap.  We want to avoid spamming consumers of these events.
@@ -648,8 +677,10 @@ func (m *Monitor) handlePotentialChange(newState *State, forceCallbacks bool) {
 	defer m.mu.Unlock()
 	m.lastReconcile = time.Now()
 	oldState := m.ifState
+	forceRebind := m.forceRebindPending
+	m.forceRebindPending = false
 	timeJumped := shouldMonitorTimeJump && m.checkWallTimeAdvanceLocked()
-	if !timeJumped && !forceCallbacks && oldState.Equal(newState) {
+	if !timeJumped && !forceCallbacks && !forceRebind && oldState.Equal(newState) {
 		// Exactly equal. Nothing to do.
 		metricChangeEq.Add(1)
 		return
@@ -660,6 +691,9 @@ func (m *Monitor) handlePotentialChange(newState *State, forceCallbacks bool) {
 	if err != nil {
 		m.logf("[unexpected] error creating ChangeDelta: %v", err)
 		return
+	}
+	if forceRebind && newState.AnyInterfaceUp() {
+		delta.RebindLikelyRequired = true
 	}
 
 	if delta.RebindLikelyRequired {

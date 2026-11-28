@@ -16,6 +16,9 @@ import android.net.Uri;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.PowerManager;
+import android.os.SystemClock;
+import android.provider.Settings;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
@@ -44,8 +47,10 @@ public class MainActivity extends Activity {
     private TextView statusDot;
     private TextView statusText;
     private Button btnVpnToggle;
+    private Button btnKeepAlive;
     private String pendingQrMode = "sync";
     private ValueCallback<Uri[]> fileChooserCallback;
+    private long pausedAtMs = 0L;
 
     private final BroadcastReceiver vpnReceiver = new BroadcastReceiver() {
         @Override
@@ -121,10 +126,17 @@ public class MainActivity extends Activity {
         titleCol.addView(subRow);
         topBar.addView(titleCol);
 
+        btnKeepAlive = makePillButton("保活", "#334155", "#FCD34D");
+        btnKeepAlive.setOnClickListener(v -> requestIgnoreBatteryOptimizations());
+        LinearLayout.LayoutParams keepLp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(34));
+        keepLp.rightMargin = dp(6);
+        btnKeepAlive.setLayoutParams(keepLp);
+        topBar.addView(btnKeepAlive);
+
         Button btnScan = makePillButton("扫码同步", "#1E293B", "#7DD3FC");
         btnScan.setOnClickListener(v -> launchQrScanner("sync"));
         LinearLayout.LayoutParams scanLp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(34));
-        scanLp.rightMargin = dp(8);
+        scanLp.rightMargin = dp(6);
         btnScan.setLayoutParams(scanLp);
         topBar.addView(btnScan);
 
@@ -196,7 +208,69 @@ public class MainActivity extends Activity {
         }
 
         updateVpnBar(ClashVpnService.isRunning);
+        updateKeepAliveButton();
         bootCoreAndLoadUi();
+    }
+
+    @Override
+    protected void onPause() {
+        pausedAtMs = SystemClock.elapsedRealtime();
+        super.onPause();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        updateVpnBar(ClashVpnService.isRunning);
+        updateKeepAliveButton();
+        long pausedAt = pausedAtMs;
+        pausedAtMs = 0L;
+        if (ClashVpnService.isRunning && pausedAt > 0L) {
+            long awayMs = SystemClock.elapsedRealtime() - pausedAt;
+            if (awayMs >= 30_000L) {
+                final int flags = awayMs >= 45_000L ? 1 : 0;
+                final String reason = "app-resume-" + (awayMs / 1000L) + "s";
+                new Thread(() -> CoreProcessManager.sendNetworkChange("", "", flags, reason)).start();
+            }
+        }
+    }
+
+    private boolean isIgnoringBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return true;
+        }
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        return pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
+    }
+
+    private void updateKeepAliveButton() {
+        if (btnKeepAlive == null) {
+            return;
+        }
+        btnKeepAlive.setVisibility(isIgnoringBatteryOptimizations() ? View.GONE : View.VISIBLE);
+    }
+
+    @SuppressLint("BatteryLife")
+    private void requestIgnoreBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return;
+        }
+        if (isIgnoringBatteryOptimizations()) {
+            Toast.makeText(this, "已加入电池优化白名单", Toast.LENGTH_SHORT).show();
+            updateKeepAliveButton();
+            return;
+        }
+        try {
+            Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+            intent.setData(Uri.parse("package:" + getPackageName()));
+            startActivity(intent);
+        } catch (Exception e) {
+            try {
+                startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+            } catch (Exception ignored) {
+                Toast.makeText(this, "请在系统设置中允许 Clash Harmony 后台高耗电/忽略电池优化", Toast.LENGTH_LONG).show();
+            }
+        }
     }
 
     private void bootCoreAndLoadUi() {
@@ -360,6 +434,16 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void openExternalUrl(String url) {
             runOnUiThread(() -> openInExternalBrowser(url));
+        }
+
+        @JavascriptInterface
+        public boolean isBatteryOptimizationIgnored() {
+            return isIgnoringBatteryOptimizations();
+        }
+
+        @JavascriptInterface
+        public void requestBatteryOptimizationIgnore() {
+            runOnUiThread(MainActivity.this::requestIgnoreBatteryOptimizations);
         }
 
         @JavascriptInterface

@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	appVersion                   = "v2.4.5-win"
+	appVersion                   = "v2.4.6"
 	defaultControllerAddr        = "127.0.0.1:9090"
 	defaultUIAddr                = "127.0.0.1:9091"
 	defaultMixedPort             = 7890

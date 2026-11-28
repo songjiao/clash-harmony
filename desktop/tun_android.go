@@ -93,7 +93,7 @@ func applyAndroidTunConfig(cfg *config.Config, tunFD int) error {
 	cfg.General.Tun.AutoRedirect = false
 	cfg.General.Tun.AutoDetectInterface = false
 	cfg.General.Tun.StrictRoute = false
-	cfg.General.Tun.MTU = 1500
+	cfg.General.Tun.MTU = 1360
 	cfg.General.Tun.Inet4Address = []netip.Prefix{netip.MustParsePrefix("198.18.0.1/16")}
 	cfg.General.Tun.Inet6Address = nil
 	cfg.General.Tun.DNSHijack = []string{"any:53", "tcp://any:53"}
@@ -168,6 +168,34 @@ func handleAndroidTunConn(conn *net.UnixConn, engine *DesktopEngine) {
 				}
 			}
 		}
+	}
+
+	if strings.HasPrefix(cmd, "NETCHANGE|") {
+		if receivedFD >= 0 {
+			_ = unix.Close(receivedFD)
+		}
+		parts := strings.SplitN(cmd, "|", 5)
+		ifaceName := ""
+		gateway := ""
+		flags := 0
+		reason := "android-netchange"
+		if len(parts) > 1 {
+			ifaceName = strings.TrimSpace(parts[1])
+		}
+		if len(parts) > 2 {
+			gateway = strings.TrimSpace(parts[2])
+		}
+		if len(parts) > 3 {
+			_, _ = fmt.Sscanf(strings.TrimSpace(parts[3]), "%d", &flags)
+		}
+		if len(parts) > 4 && strings.TrimSpace(parts[4]) != "" {
+			reason = strings.TrimSpace(parts[4])
+		}
+		rebindTS := flags&1 != 0
+		pruneNonTS := flags&2 != 0
+		engine.NotifyNetworkChange(ifaceName, gateway, reason, rebindTS, pruneNonTS)
+		_, _ = conn.Write([]byte("OK\n"))
+		return
 	}
 
 	if strings.EqualFold(cmd, "STOP") || receivedFD < 0 {

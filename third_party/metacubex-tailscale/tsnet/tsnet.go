@@ -735,6 +735,38 @@ func (s *Server) CertDomains() []string {
 	return slices.Clone(nm.DNS.CertDomains)
 }
 
+// NotifyNetworkChange wakes the link monitor after an OS-level network
+// transition or wake-from-sleep event. When forceRebind is true, it triggers
+// an atomic InjectRebind so netmon refreshes InterfaceState FIRST and then
+// drives a single clean MagicSock Rebind + ReSTUN against the fresh IPs.
+func (s *Server) NotifyNetworkChange(forceRebind bool, reason string) {
+	if s == nil {
+		return
+	}
+	if reason == "" {
+		reason = "host-network-change"
+	}
+	if s.netMon != nil {
+		if forceRebind {
+			s.netMon.InjectRebind()
+		} else {
+			s.netMon.InjectEvent()
+		}
+		return
+	}
+	if s.sys == nil {
+		return
+	}
+	mc, ok := s.sys.MagicSock.GetOK()
+	if !ok || mc == nil {
+		return
+	}
+	if forceRebind {
+		mc.Rebind()
+	}
+	mc.ReSTUN(reason)
+}
+
 // TailscaleIPs returns IPv4 and IPv6 addresses for this node. If the node
 // has not yet joined a tailnet or is otherwise unaware of its own IP addresses,
 // the returned ip4, ip6 will be !netip.IsValid().

@@ -934,6 +934,29 @@ func (c *Conn) maybeCloseDERPsOnRebind(okayLocalIPs []netip.Prefix) {
 	c.logActiveDerpLocked()
 }
 
+// pingActiveDERPsOnRebind probes all active DERP connections with a short
+// timeout when local interface IPs could not be determined during Rebind,
+// closing and reconnecting any stale DERP TCP connections.
+func (c *Conn) pingActiveDERPsOnRebind() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for regionID, ad := range c.activeDerp {
+		dc := ad.c
+		rid := regionID
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := dc.Ping(ctx); err != nil {
+				c.mu.Lock()
+				defer c.mu.Unlock()
+				c.closeOrReconnectDERPLocked(rid, "rebind-ping-fail")
+				return
+			}
+			c.logf("post-rebind ping of DERP region %d okay", rid)
+		}()
+	}
+}
+
 // closeOrReconnectDERPLocked closes the DERP connection to the
 // provided regionID and starts reconnecting it if it's our current
 // home DERP.

@@ -3,7 +3,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { rpc } from '@kit.IPCKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { VpnExtensionAbility, vpnExtension } from '@kit.NetworkKit';
+import { VpnExtensionAbility, connection, vpnExtension } from '@kit.NetworkKit';
 import { CoreBridgeService, CoreBridgeState } from '../services/CoreBridgeService';
 import { ControllerStatus, MihomoControllerService } from '../services/MihomoControllerService';
 import nativeCore from 'libentry.so';
@@ -12,6 +12,9 @@ const DOMAIN: number = 0x0001;
 const TAG: string = 'ClashVpnExtension';
 const BUNDLE_NAME: string = 'com.sjfarmltd.tailscale';
 const PARAM_CONFIG_PATH: string = 'configPath';
+const MOBILE_TUN_MTU: number = 1360;
+const FLAG_REBIND_TS: number = 1;
+const FLAG_PRUNE_NON_TS: number = 2;
 
 export default class ClashVpnExtensionAbility extends VpnExtensionAbility {
   private connection?: vpnExtension.VpnConnection;
@@ -19,6 +22,13 @@ export default class ClashVpnExtensionAbility extends VpnExtensionAbility {
   private configPath: string = '';
   private starting: boolean = false;
   private bindStub?: rpc.RemoteObject;
+
+  private netConn?: connection.NetConnection;
+  private activeNetId: number = -1;
+  private lastIfaceName: string = '';
+  private lastBearer: string = '';
+  private hasBaselineNet: boolean = false;
+  private wasOffline: boolean = false;
 
   onConnect(_want: Want): rpc.RemoteObject {
     if (!this.bindStub) {
@@ -93,6 +103,181 @@ export default class ClashVpnExtensionAbility extends VpnExtensionAbility {
     }
   }
 
+  private isIgnoredInterface(ifaceName: string): boolean {
+    const lower: string = ifaceName.trim().toLowerCase();
+    if (lower.length === 0) {
+      return true;
+    }
+    return lower.startsWith('vpn') ||
+      lower.startsWith('tun') ||
+      lower.startsWith('rmnet_ims') ||
+      lower.startsWith('ancormnet');
+  }
+
+  private describeBearer(caps: connection.NetCapabilities | undefined): string {
+    if (!caps || !caps.bearerTypes) {
+      return 'net';
+    }
+    for (let i = 0; i < caps.bearerTypes.length; i++) {
+      const bt: connection.NetBearType = caps.bearerTypes[i];
+      if (bt === connection.NetBearType.BEARER_VPN) {
+        return 'vpn';
+      }
+    }
+    for (let i = 0; i < caps.bearerTypes.length; i++) {
+      const bt: connection.NetBearType = caps.bearerTypes[i];
+      if (bt === connection.NetBearType.BEARER_WIFI) {
+        return 'wifi';
+      }
+      if (bt === connection.NetBearType.BEARER_CELLULAR) {
+        return 'cellular';
+      }
+      if (bt === connection.NetBearType.BEARER_ETHERNET) {
+        return 'ethernet';
+      }
+    }
+    return 'other';
+  }
+
+  private inspectNetHandle(handle: connection.NetHandle, propsArg: connection.ConnectionProperties | undefined,
+    capsArg: connection.NetCapabilities | undefined, trigger: string): void {
+    if (this.tunFd < 0 || handle.netId <= 0) {
+      return;
+    }
+    let caps: connection.NetCapabilities | undefined = capsArg;
+    if (!caps) {
+      try {
+        caps = connection.getNetCapabilitiesSync(handle);
+      } catch (_capErr) {
+      }
+    }
+    const bearer: string = this.describeBearer(caps);
+    if (bearer === 'vpn') {
+      return;
+    }
+
+    let props: connection.ConnectionProperties | undefined = propsArg;
+    if (!props) {
+      try {
+        props = connection.getConnectionPropertiesSync(handle);
+      } catch (_propErr) {
+      }
+    }
+    const ifaceName: string = props && props.interfaceName ? props.interfaceName.trim() : '';
+    if (this.isIgnoredInterface(ifaceName)) {
+      return;
+    }
+
+    if (!this.hasBaselineNet) {
+      this.hasBaselineNet = true;
+      this.wasOffline = false;
+      this.activeNetId = handle.netId;
+      this.lastIfaceName = ifaceName;
+      this.lastBearer = bearer;
+      CoreBridgeService.notifyNetworkChange(ifaceName, `baseline-${bearer}`, 0);
+      hilog.info(DOMAIN, TAG, 'Network monitor baseline: netId=%{public}d iface=%{public}s bearer=%{public}s',
+        handle.netId, ifaceName, bearer);
+      this.appendExtLog(`netMonitor baseline iface=${ifaceName} bearer=${bearer}`);
+      return;
+    }
+
+    const changed: boolean = this.wasOffline ||
+      ifaceName !== this.lastIfaceName ||
+      (bearer !== this.lastBearer && bearer !== 'net');
+    if (!changed) {
+      this.activeNetId = handle.netId;
+      return;
+    }
+
+    let reason: string = `route-${bearer}-${trigger}`;
+    if (this.wasOffline) {
+      reason = `recover-${bearer}`;
+    } else if (bearer !== this.lastBearer && this.lastBearer.length > 0) {
+      reason = `switch-${this.lastBearer}-to-${bearer}`;
+    } else if (ifaceName !== this.lastIfaceName) {
+      reason = `iface-${this.lastIfaceName}-to-${ifaceName}`;
+    }
+
+    this.activeNetId = handle.netId;
+    this.lastIfaceName = ifaceName;
+    this.lastBearer = bearer;
+    this.wasOffline = false;
+
+    const ok: boolean = CoreBridgeService.notifyNetworkChange(ifaceName, reason, FLAG_REBIND_TS | FLAG_PRUNE_NON_TS);
+    hilog.info(DOMAIN, TAG, 'Network roaming detected: reason=%{public}s iface=%{public}s notified=%{public}s',
+      reason, ifaceName, ok ? 'true' : 'false');
+    this.appendExtLog(`netMonitor change reason=${reason} iface=${ifaceName} notified=${ok}`);
+  }
+
+  private startNetworkMonitor(): void {
+    this.stopNetworkMonitor();
+    this.activeNetId = -1;
+    this.lastIfaceName = '';
+    this.lastBearer = '';
+    this.hasBaselineNet = false;
+    this.wasOffline = false;
+
+    try {
+      const nc: connection.NetConnection = connection.createNetConnection();
+      nc.on('netAvailable', (handle: connection.NetHandle): void => {
+        this.inspectNetHandle(handle, undefined, undefined, 'available');
+      });
+      nc.on('netConnectionPropertiesChange', (info: connection.NetConnectionPropertyInfo): void => {
+        this.inspectNetHandle(info.netHandle, info.connectionProperties, undefined, 'props');
+      });
+      nc.on('netCapabilitiesChange', (info: connection.NetCapabilityInfo): void => {
+        this.inspectNetHandle(info.netHandle, undefined, info.netCap, 'caps');
+      });
+      nc.on('netLost', (handle: connection.NetHandle): void => {
+        if (this.tunFd < 0) {
+          return;
+        }
+        if (this.activeNetId > 0 && handle.netId !== this.activeNetId) {
+          return;
+        }
+        this.wasOffline = true;
+        this.activeNetId = -1;
+        CoreBridgeService.notifyNetworkChange('', 'net-lost', 0);
+        hilog.info(DOMAIN, TAG, 'Active network lost: netId=%{public}d', handle.netId);
+        this.appendExtLog(`netMonitor lost netId=${handle.netId}`);
+      });
+      nc.register((err: BusinessError): void => {
+        if (err) {
+          hilog.warn(DOMAIN, TAG, 'NetConnection register failed: code=%{public}d msg=%{public}s',
+            err.code ?? -1, err.message ?? '');
+          return;
+        }
+        hilog.info(DOMAIN, TAG, 'HarmonyOS NetConnection roaming monitor registered');
+        try {
+          const defHandle: connection.NetHandle = connection.getDefaultNetSync();
+          if (defHandle && defHandle.netId > 0) {
+            this.inspectNetHandle(defHandle, undefined, undefined, 'initial');
+          }
+        } catch (_defErr) {
+        }
+      });
+      this.netConn = nc;
+    } catch (err) {
+      const bErr: BusinessError = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'startNetworkMonitor failed: code=%{public}d msg=%{public}s',
+        bErr.code ?? -1, bErr.message ?? '');
+    }
+  }
+
+  private stopNetworkMonitor(): void {
+    const nc: connection.NetConnection | undefined = this.netConn;
+    this.netConn = undefined;
+    this.activeNetId = -1;
+    this.hasBaselineNet = false;
+    this.wasOffline = false;
+    if (nc) {
+      try {
+        nc.unregister((_err: BusinessError): void => {});
+      } catch (_err) {
+      }
+    }
+  }
+
   private async startTunnel(): Promise<void> {
     if (this.starting || this.tunFd >= 0) {
       return;
@@ -122,8 +307,9 @@ export default class ClashVpnExtensionAbility extends VpnExtensionAbility {
         await new Promise<void>((resolve: () => void) => { setTimeout(resolve, 300); });
         this.tunFd = await this.connection.create(config);
       }
-      hilog.info(DOMAIN, TAG, 'VPN TUN created, fd=%{public}d, config=%{public}s', this.tunFd, this.configPath);
-      this.appendExtLog(`connection.create ok tunFd=${this.tunFd}`);
+      hilog.info(DOMAIN, TAG, 'VPN TUN created, fd=%{public}d, mtu=%{public}d, config=%{public}s',
+        this.tunFd, MOBILE_TUN_MTU, this.configPath);
+      this.appendExtLog(`connection.create ok tunFd=${this.tunFd} mtu=${MOBILE_TUN_MTU}`);
       try {
         await this.connection.protectProcessNet();
         hilog.info(DOMAIN, TAG, 'VPN process network protected for native core outbound sockets');
@@ -144,6 +330,7 @@ export default class ClashVpnExtensionAbility extends VpnExtensionAbility {
           coreState.adapterKind, coreState.realConnectionReady ? 'true' : 'false',
           coreState.supportsControllerOnly ? 'true' : 'false');
         this.appendExtLog(`startTun OK mode=${coreState.coreMode} adapter=${coreState.adapterMode} kind=${coreState.adapterKind} ver=${coreState.adapterVersion} nativeFd=${coreState.nativeFd}`);
+        this.startNetworkMonitor();
         await this.markControllerReadyInVpnProcess();
       }
     } catch (err) {
@@ -173,6 +360,7 @@ export default class ClashVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   private async stopTunnel(): Promise<void> {
+    this.stopNetworkMonitor();
     if (!this.connection) {
       this.tunFd = -1;
       return;
@@ -227,7 +415,7 @@ export default class ClashVpnExtensionAbility extends VpnExtensionAbility {
       blockedApplications: [
         BUNDLE_NAME
       ],
-      mtu: 1500,
+      mtu: MOBILE_TUN_MTU,
       isIPv4Accepted: true,
       isIPv6Accepted: false,
       isInternal: false,

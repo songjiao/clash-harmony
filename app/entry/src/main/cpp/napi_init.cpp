@@ -440,6 +440,30 @@ napi_value ValidateConfig(napi_env env, napi_callback_info info)
     return CreateString(env, json == nullptr ? "" : std::string(json));
 }
 
+napi_value NotifyNetworkChange(napi_env env, napi_callback_info info)
+{
+    size_t argc = 3;
+    napi_value args[3] = {nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    std::string ifaceName;
+    std::string reason;
+    int32_t flags = 0;
+    if (argc >= 1) {
+        ReadStringArg(env, args[0], ifaceName);
+    }
+    if (argc >= 2) {
+        ReadStringArg(env, args[1], reason);
+    }
+    if (argc >= 3) {
+        napi_get_value_int32(env, args[2], &flags);
+    }
+    int res = MihomoNotifyNetworkChange(ifaceName.c_str(), reason.c_str(), flags);
+    napi_value out = nullptr;
+    napi_create_int32(env, res, &out);
+    return out;
+}
+
 } // namespace
 
 EXTERN_C_START
@@ -455,7 +479,8 @@ static napi_value Init(napi_env env, napi_value exports)
         { "protectSocket", nullptr, ProtectSocket, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setProtectCallback", nullptr, SetProtectCallback, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "getForwarderStats", nullptr, GetForwarderStats, nullptr, nullptr, nullptr, napi_default, nullptr },
-        { "validateConfig", nullptr, ValidateConfig, nullptr, nullptr, nullptr, napi_default, nullptr }
+        { "validateConfig", nullptr, ValidateConfig, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "notifyNetworkChange", nullptr, NotifyNetworkChange, nullptr, nullptr, nullptr, napi_default, nullptr }
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

@@ -19,6 +19,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
   $repoRoot = Split-Path -Parent $PSScriptRoot
   if ([string]::IsNullOrWhiteSpace($SourceExe)) {
     $candidates = @(
+      "$repoRoot\desktop\dist\clash-harmony-v2.4.6.exe",
       "$repoRoot\desktop\dist\clash-harmony-v2.4.5.exe",
       "$repoRoot\desktop\dist\clash-harmony-v2.4.4.exe",
       "$repoRoot\desktop\dist\clash-harmony-v2.4.3.exe",
@@ -46,6 +47,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($SourceExe)) {
   $candidates = @(
+    "$repoRoot\desktop\dist\clash-harmony-v2.4.6.exe",
     "$repoRoot\desktop\dist\clash-harmony-v2.4.5.exe",
     "$repoRoot\desktop\dist\clash-harmony-v2.4.4.exe",
     "$repoRoot\desktop\dist\clash-harmony-v2.4.3.exe",
@@ -56,7 +58,7 @@ if ([string]::IsNullOrWhiteSpace($SourceExe)) {
   }
 }
 if (-not (Test-Path $SourceExe)) {
-  throw "Executable not found: $SourceExe. Please build desktop/dist/clash-harmony-v2.4.5.exe first."
+  throw "Executable not found: $SourceExe. Please build desktop/dist/clash-harmony-v2.4.6.exe first."
 }
 
 Write-Host "[1/6] Stopping any existing ClashHarmony service or desktop process..."

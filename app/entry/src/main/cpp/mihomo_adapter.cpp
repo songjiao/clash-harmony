@@ -36,6 +36,7 @@ using DetachTunFn = int (*)(void);
 using StopFn = int (*)(void);
 using StringFn = const char* (*)(void);
 using ValidateConfigFn = const char* (*)(const char*);
+using NotifyNetworkChangeFn = int (*)(const char*, const char*, int);
 using FreeCStringFn = void (*)(char*);
 
 const char* REAL_ADAPTER_LIBRARY = "libmihomo_ohos.so";
@@ -61,6 +62,7 @@ StringFn g_realVersion = nullptr;
 StringFn g_realLastError = nullptr;
 StringFn g_realAdapterInfo = nullptr;
 ValidateConfigFn g_realValidateConfig = nullptr;
+NotifyNetworkChangeFn g_realNotifyNetworkChange = nullptr;
 FreeCStringFn g_realFreeCString = nullptr;
 std::string g_lastError;
 std::string g_realLoadError;
@@ -230,6 +232,7 @@ void ResetRealAdapterLocked()
     g_realLastError = nullptr;
     g_realAdapterInfo = nullptr;
     g_realValidateConfig = nullptr;
+    g_realNotifyNetworkChange = nullptr;
     g_realFreeCString = nullptr;
 }
 
@@ -1012,6 +1015,7 @@ bool EnsureRealAdapterLoadedLocked()
     g_realDetachTun = reinterpret_cast<DetachTunFn>(LoadOptionalSymbol("MihomoDetachTun"));
     g_realAdapterInfo = reinterpret_cast<StringFn>(LoadOptionalSymbol("MihomoAdapterInfo"));
     g_realValidateConfig = reinterpret_cast<ValidateConfigFn>(LoadOptionalSymbol("MihomoValidateConfig"));
+    g_realNotifyNetworkChange = reinterpret_cast<NotifyNetworkChangeFn>(LoadOptionalSymbol("MihomoNotifyNetworkChange"));
     g_realFreeCString = reinterpret_cast<FreeCStringFn>(LoadOptionalSymbol("MihomoFreeCString"));
     g_realLoadError.clear();
     g_lastError.clear();
@@ -1345,4 +1349,53 @@ const char* MihomoValidateConfig(const char* yamlText)
         ? "{\"ok\":false,\"line\":0,\"error\":\"内核未返回校验结果\",\"warnings\":[]}"
         : call.resultJson;
     return g_stringScratch.c_str();
+}
+
+namespace {
+
+struct RealNetChangeCall {
+    NotifyNetworkChangeFn fn = nullptr;
+    std::string ifaceName;
+    std::string reason;
+    int flags = 0;
+    int result = -1;
+};
+
+void* RealNetChangeWorker(void* opaque)
+{
+    auto* call = reinterpret_cast<RealNetChangeCall*>(opaque);
+    call->result = call->fn(call->ifaceName.c_str(), call->reason.c_str(), call->flags);
+    return nullptr;
+}
+
+} // namespace
+
+int MihomoNotifyNetworkChange(const char* ifaceName, const char* reason, int flags)
+{
+    std::lock_guard<std::mutex> lock(g_adapterMutex);
+    if (!g_started || !HasRealAdapterLocked() || g_realNotifyNetworkChange == nullptr) {
+        return -1;
+    }
+
+    RealNetChangeCall call;
+    call.fn = g_realNotifyNetworkChange;
+    call.ifaceName = ifaceName == nullptr ? "" : ifaceName;
+    call.reason = reason == nullptr ? "" : reason;
+    call.flags = flags;
+
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0) {
+        return -2;
+    }
+    constexpr size_t GO_WORKER_STACK_SIZE = 8 * 1024 * 1024;
+    pthread_attr_setstacksize(&attr, GO_WORKER_STACK_SIZE);
+
+    pthread_t thread {};
+    int createResult = pthread_create(&thread, &attr, RealNetChangeWorker, &call);
+    pthread_attr_destroy(&attr);
+    if (createResult != 0) {
+        return -3;
+    }
+    pthread_join(thread, nullptr);
+    return call.result;
 }

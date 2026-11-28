@@ -116,8 +116,8 @@ func configureRuntimeConfig(cfg *config.Config, tunFd int) (int, error) {
 	cfg.General.Tun.Stack = C.TunGvisor
 	cfg.General.Tun.FileDescriptor = dupFd
 	cfg.General.Tun.Device = "vpn-tun"
-	if cfg.General.Tun.MTU == 0 {
-		cfg.General.Tun.MTU = 1500
+	if cfg.General.Tun.MTU == 0 || cfg.General.Tun.MTU > 1360 {
+		cfg.General.Tun.MTU = 1360
 	}
 	if len(cfg.General.Tun.Inet4Address) == 0 {
 		cfg.General.Tun.Inet4Address = []netip.Prefix{netip.MustParsePrefix("198.18.0.1/16")}

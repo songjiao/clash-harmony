@@ -21,6 +21,7 @@ const char* MihomoAdapterKind(void);
 const char* MihomoAdapterInfo(void);
 const char* MihomoAdapterLoadError(void);
 const char* MihomoValidateConfig(const char* yamlText);
+int MihomoNotifyNetworkChange(const char* ifaceName, const char* reason, int flags);
 bool MihomoSupportsControllerOnly(void);
 bool MihomoSupportsTunAttach(void);
 

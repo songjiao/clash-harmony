@@ -55,6 +55,19 @@ func MihomoValidateConfig(yamlText *C.char) *C.char {
 	return C.CString(validateConfigJSON(text))
 }
 
+//export MihomoNotifyNetworkChange
+func MihomoNotifyNetworkChange(ifaceName *C.char, reason *C.char, flags C.int) C.int {
+	goIface := ""
+	if ifaceName != nil {
+		goIface = C.GoString(ifaceName)
+	}
+	goReason := ""
+	if reason != nil {
+		goReason = C.GoString(reason)
+	}
+	return C.int(bridge.notifyNetworkChange(goIface, goReason, int(flags)))
+}
+
 //export MihomoFreeCString
 func MihomoFreeCString(s *C.char) {
 	if s != nil {

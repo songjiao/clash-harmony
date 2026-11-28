@@ -101,7 +101,7 @@ if (-not (Test-Path $ksPath)) {
   if ($LASTEXITCODE -ne 0) { throw "keytool failed" }
 }
 
-$outApk = "$distDir\clash-harmony-android-v2.4.5.apk"
+$outApk = "$distDir\clash-harmony-android-v2.4.6.apk"
 & "$btDir\apksigner.bat" sign --ks $ksPath --ks-pass pass:android --ks-key-alias clashharmony --key-pass pass:android --out $outApk "$buildDir\aligned.apk"
 if ($LASTEXITCODE -ne 0) { throw "apksigner failed" }
 

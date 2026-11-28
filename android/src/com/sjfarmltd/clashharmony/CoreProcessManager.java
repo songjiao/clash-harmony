@@ -149,6 +149,43 @@ public final class CoreProcessManager {
         return "ERR:无法连接核心 TUN 控制通道";
     }
 
+    public static void sendNetworkChange(String ifaceName, String gateway, int flags, String reason) {
+        String sockName = activeSocketName.isEmpty() ? getTunSocketName() : activeSocketName;
+        String safeIface = sanitizeField(ifaceName);
+        String safeGw = sanitizeField(gateway);
+        String safeReason = sanitizeField(reason);
+        if (safeReason.isEmpty()) {
+            safeReason = "android-netchange";
+        }
+        String payload = "NETCHANGE|" + safeIface + "|" + safeGw + "|" + flags + "|" + safeReason + "\n";
+
+        LocalSocket socket = new LocalSocket();
+        try {
+            socket.connect(new LocalSocketAddress(sockName, LocalSocketAddress.Namespace.ABSTRACT));
+            socket.setSoTimeout(3000);
+            OutputStream os = socket.getOutputStream();
+            os.write(payload.getBytes(StandardCharsets.UTF_8));
+            os.flush();
+            BufferedReader br = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+            String resp = br.readLine();
+            Log.i(TAG, "sendNetworkChange(" + safeReason + ", iface=" + safeIface + ", gw=" + safeGw + ", flags=" + flags + ") -> " + resp);
+        } catch (IOException e) {
+            Log.w(TAG, "sendNetworkChange ignored: " + e.getMessage());
+        } finally {
+            try {
+                socket.close();
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
+    private static String sanitizeField(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.replace("|", "_").replace("\r", "").replace("\n", "").trim();
+    }
+
     public static void sendStopVpn() {
         String sockName = activeSocketName.isEmpty() ? getTunSocketName() : activeSocketName;
         LocalSocket socket = new LocalSocket();

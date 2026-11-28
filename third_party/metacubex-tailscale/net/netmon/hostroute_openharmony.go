@@ -23,6 +23,10 @@ func UpdateLastKnownDefaultRouteInterface(name string) {
 	hostDefaultInterface.Store(&name)
 }
 
+// UpdateLastKnownDefaultGateway is a no-op on OpenHarmony/HarmonyOS (gateway hints
+// are only used on Android where /proc/net/route is restricted).
+func UpdateLastKnownDefaultGateway(string) {}
+
 func hostDefaultRoute() (DefaultRouteDetails, bool) {
 	name := hostDefaultInterface.Load()
 	if name == nil {

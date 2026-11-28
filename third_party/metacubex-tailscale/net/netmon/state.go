@@ -56,7 +56,10 @@ func isProblematicInterface(nif *net.Interface) bool {
 }
 
 func isHarmonyProblematicInterface(name string) bool {
-	return strings.HasPrefix(name, "rmnet_ims") || strings.HasPrefix(name, "ancormnet") || name == "vpn-tun"
+	return strings.HasPrefix(name, "rmnet_ims") ||
+		strings.HasPrefix(name, "ancormnet") ||
+		strings.HasPrefix(name, "ancowlan") ||
+		name == "vpn-tun"
 }
 
 // LocalAddresses returns the machine's IP addresses, separated by

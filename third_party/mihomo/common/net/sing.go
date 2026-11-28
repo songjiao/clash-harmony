@@ -3,6 +3,7 @@ package net
 import (
 	"io"
 	"net"
+	"sync"
 
 	"github.com/metacubex/mihomo/common/net/deadline"
 
@@ -84,6 +85,46 @@ func Relay(leftConn, rightConn net.Conn) {
 	}()
 
 	_, err := bufio.Copy(rightConn, leftConn)
+	if err == nil {
+		_ = closeWrite(rightConn)
+	} else {
+		_ = rightConn.Close()
+	}
+	<-ch
+}
+
+// RelayWithCloseHook behaves identically to Relay and invokes onFirstClose once
+// with whichever direction ("inbound" = left->right, "outbound" = right->left)
+// terminated first, along with its error (nil means clean EOF / TCP FIN).
+func RelayWithCloseHook(leftConn, rightConn net.Conn, onFirstClose func(side string, err error)) {
+	defer func() {
+		_ = leftConn.Close()
+		_ = rightConn.Close()
+	}()
+
+	var once sync.Once
+	notify := func(side string, err error) {
+		if onFirstClose != nil {
+			once.Do(func() {
+				onFirstClose(side, err)
+			})
+		}
+	}
+
+	ch := make(chan struct{})
+	go func() {
+		_, err := bufio.Copy(leftConn, rightConn)
+		notify("outbound", err)
+		if err == nil {
+			_ = closeWrite(leftConn)
+		} else {
+			_ = leftConn.Close()
+		}
+		close(ch)
+	}()
+
+	_, err := bufio.Copy(rightConn, leftConn)
+	notify("inbound", err)
 	if err == nil {
 		_ = closeWrite(rightConn)
 	} else {

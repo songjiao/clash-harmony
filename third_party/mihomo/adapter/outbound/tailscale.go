@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/component/ca"
@@ -111,7 +112,7 @@ type Tailscale struct {
 	backendInitCh   chan struct{}
 	backendInitErr  error
 
-	serverStarted     bool
+	serverStarted     atomic.Bool
 	advertisePrefixes []netip.Prefix
 
 	statusMu       sync.Mutex
@@ -404,7 +405,7 @@ func (t *Tailscale) start() error {
 			t.setBackendInitialized(err)
 			return
 		}
-		t.serverStarted = true
+		t.serverStarted.Store(true)
 		ctx, cancel := context.WithTimeout(t.ctx, 30*time.Second)
 		defer cancel()
 		if err := t.applyPrefs(ctx); err != nil {
@@ -429,10 +430,24 @@ func (t *Tailscale) Start() error {
 
 // LocalClient returns the tsnet LocalClient once the Tailscale server has started.
 func (t *Tailscale) LocalClient() (*local.Client, error) {
-	if t.server == nil || !t.serverStarted {
+	if t.server == nil || !t.serverStarted.Load() {
 		return nil, errors.New("tailscale server not started")
 	}
 	return t.server.LocalClient()
+}
+
+// NotifyNetworkChange propagates an OS-level network switch or wake event into
+// tsnet so MagicSock rebinds UDP/DERP sockets and re-runs STUN/Disco discovery
+// without tearing down active inner Tailscale TCP streams.
+func (t *Tailscale) NotifyNetworkChange(forceRebind bool, reason string) {
+	if t == nil || t.server == nil || !t.serverStarted.Load() || t.ctx.Err() != nil {
+		return
+	}
+	if reason == "" {
+		reason = "host-network-change"
+	}
+	t.recordLog(fmt.Sprintf("network change (%s, rebind=%v)", reason, forceRebind), false)
+	t.server.NotifyNetworkChange(forceRebind, reason)
 }
 
 // Option returns a copy of the configured Tailscale outbound options.
@@ -987,7 +1002,7 @@ func (t *Tailscale) Close() error {
 	t.startOnce.Do(func() {
 		t.startErr = errors.New("tailscale outbound closed")
 	})
-	if t.server != nil && t.serverStarted { // tsnet.Server.Close() must not be called before or concurrently with Start.
+	if t.server != nil && t.serverStarted.Load() { // tsnet.Server.Close() must not be called before or concurrently with Start.
 		t.updateStatus(func(st *TailscaleStatus) {
 			st.BackendState = "Stopped"
 			st.AuthURL = ""

@@ -671,6 +671,37 @@ func newTailscaleAPIMux() *http.ServeMux {
 		writeJSON(w, http.StatusOK, evaluateLiveRuleMatch(req.Target, req.Port, req.Network))
 	})
 
+	mux.HandleFunc("/network/rebind", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "stats": ohosNetCoordinator.Stats()})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		var req struct {
+			IfaceName         string `json:"ifaceName"`
+			Reason            string `json:"reason"`
+			RebindTailscale   *bool  `json:"rebindTailscale"`
+			PruneNonTailscale *bool  `json:"pruneNonTailscale"`
+		}
+		_ = json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&req)
+		flags := 0
+		if req.RebindTailscale == nil || *req.RebindTailscale {
+			flags |= netChangeFlagRebindTS
+		}
+		if req.PruneNonTailscale != nil && *req.PruneNonTailscale {
+			flags |= netChangeFlagPruneNonTS
+		}
+		reason := strings.TrimSpace(req.Reason)
+		if reason == "" {
+			reason = "api-rebind"
+		}
+		bridge.notifyNetworkChange(req.IfaceName, reason, flags)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "stats": ohosNetCoordinator.Stats()})
+	})
+
 	return mux
 }
 

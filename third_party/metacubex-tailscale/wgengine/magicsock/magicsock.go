@@ -3959,6 +3959,8 @@ func (c *Conn) Rebind() {
 
 	if len(ifIPs) > 0 {
 		c.maybeCloseDERPsOnRebind(ifIPs)
+	} else {
+		c.pingActiveDERPsOnRebind()
 	}
 	c.resetEndpointStates()
 }

@@ -49,3 +49,4 @@ export const protectSocket: (fd: number) => void;
 export const setProtectCallback: (callback: (fd: number) => void) => void;
 export const getForwarderStats: () => ForwarderStats;
 export const validateConfig: (yamlText: string) => string;
+export const notifyNetworkChange: (ifaceName: string, reason: string, flags: number) => number;
